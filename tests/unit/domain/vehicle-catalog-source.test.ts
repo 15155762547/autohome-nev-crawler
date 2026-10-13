@@ -42,14 +42,17 @@ describe('Autohome catalog contracts ported from the ES8 collector', () => {
     expect(JSON.parse(String(merged.model.common_features_json_pruned))[0].items).toEqual(['shared']);
   });
   test('only listed specs are interpreted; model scalars require every trim to agree', () => {
-    const titles = ['能源类型', '长度(mm)', '电池能量(kWh)', '厂商指导价(元)', 'CLTC纯电续航里程(km)'];
+    const titles = ['能源类型', '长度(mm)', '电池能量(kWh)', '厂商指导价(元)', 'CLTC纯电续航里程(km)', '高压平台（V）'];
     const spec = (id: number, length: string) => ({ specid: id, specname: '2026款 示例版', specstatus: 20,
-      paramconflist: ['纯电动', length, '102', '38.28万', '710'].map((v, i) => ({ titleid: i + 10, itemname: v })) });
+      paramconflist: ['纯电动', length, '102', '38.28万', '710', '800'].map((v, i) => ({ titleid: i + 10, itemname: v })) });
     const result = { bread: { seriesid: 4427, seriesname: '蔚来ES8', brandname: '蔚来' },
       titlelist: [{ items: titles.map((itemname, i) => ({ itemname, titleid: i + 10 })) }], datalist: [spec(1, '5280'), spec(2, '5300'), spec(3, '5280')] };
     const groups = interpret(result, [1, 2], '2026-10-13T12:00:00+08:00');
     expect(groups).toHaveLength(1);
     expect(groups[0].model.length_mm).toBeUndefined();
+    expect(groups[0].model.voltage_platform_v).toBe(800);
+    const differentVoltage = structuredClone(result); differentVoltage.datalist[1].paramconflist[5].itemname = '900';
+    expect(interpret(differentVoltage, [1, 2], 'now')[0].model.voltage_platform_v).toBeUndefined();
     expect(groups[0].trims.map(t => t.spec_id)).toEqual([1, 2]);
     expect(groups[0].trims[0].fields.trim_price_rmb).toBe(382800);
     expect(() => interpret(result, [4], 'now')).toThrow();

@@ -20,7 +20,7 @@ export const protectedFields = new Set(['Recommendation', 'recommended', 'segmen
   'why_section_description', 'display_price_low', 'display_price_high', 'product_path', 'version', 'status', 'page_title', 'page_subtitle', 'hero_description',
   'i18n_translations', 'added_features_json', 'upgraded_features_json']);
 export const modelNumbers: Record<string, string> = { length_mm: '长度(mm)', width_mm: '宽度(mm)', height_mm: '高度(mm)', wheelbase_mm: '轴距(mm)',
-  '0_100_km_h_sec': '官方0-100km/h加速(s)', boot_volume_l: '后备厢容积(L)', ground_clearance_mm: '最小离地间隙(mm)', v2l_output_power_kw: '对外交流放电功率(kW)' };
+  '0_100_km_h_sec': '官方0-100km/h加速(s)', boot_volume_l: '后备厢容积(L)', ground_clearance_mm: '最小离地间隙(mm)', v2l_output_power_kw: '对外交流放电功率(kW)', voltage_platform_v: '高压平台（V）' };
 export const trimNumbers: Record<string, string> = { battery_capacity_kwh: '电池能量(kWh)', range_display: 'CLTC纯电续航里程(km)',
   motor_power_kw: '电动机总功率(kW)', motor_torque_n_m: '电动机总扭矩(N·m)', dc_fast_charge_time_hours: '电池快充时间(小时)' };
 export function meaningful(v: unknown): boolean { return ![null, undefined, '', '-', '暂无数据', '暂无报价'].includes(v as string); }
