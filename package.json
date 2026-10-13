@@ -1,0 +1,13 @@
+{
+  "name": "autohome-nev-crawler",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "bun test",
+    "check": "bun x tsc --noEmit",
+    "crawler": "bun scripts/vehicle-crawler/cli.ts"
+  },
+  "dependencies": { "sharp": "0.35.4", "zod": "4.5.4" },
+  "devDependencies": { "@types/bun": "1.4.1", "typescript": "5.9.3" }
+}

@@ -1,0 +1,7 @@
+{
+  "compilerOptions": {
+    "target": "ES2022", "lib": ["ESNext", "DOM"], "module": "ESNext", "moduleResolution": "Bundler",
+    "strict": true, "noEmit": true, "esModuleInterop": true, "skipLibCheck": true, "types": ["bun"]
+  },
+  "include": ["lib/**/*.ts", "scripts/**/*.ts", "tests/**/*.ts"]
+}

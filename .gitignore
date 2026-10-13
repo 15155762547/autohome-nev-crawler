@@ -1,0 +1,5 @@
+node_modules/
+.vehicle-crawler-runs/
+.env*
+.DS_Store
+*.log
