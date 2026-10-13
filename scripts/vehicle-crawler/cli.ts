@@ -13,7 +13,8 @@ if (command === 'exclusions') await exclusions(run);
 if (command === 'select') {
   const count = Number(rest[rest.indexOf('--count') + 1]), exclude = rest[rest.indexOf('--exclude') + 1];
   if (!rest.includes('--count') || !rest.includes('--exclude') || !exclude) throw new Error('Select requires --count and --exclude');
-  await select(run, count, resolve(exclude));
+  const seriesId = rest.includes('--series') ? Number(rest[rest.indexOf('--series') + 1]) : undefined;
+  await select(run, count, resolve(exclude), seriesId);
 }
 if (command === 'collect') {
   const limitIndex = rest.indexOf('--limit'); const limit = limitIndex < 0 ? undefined : Number(rest[limitIndex + 1]);

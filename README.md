@@ -12,6 +12,14 @@
 
 ## 运行
 
+### 现场演示：只爬理想 MEGA
+
+本机在仓库目录执行 `bash scripts/run-one-mega.sh`。脚本每次生成新目录、重新联网读取目录和 MEGA 参数，只选择车系6939，随后规划、同步现有试验表并回读。终端显示7个步骤和抓到的价格、续航、电池、电机数据。目录发现会读取全部在售目录，实际参数采集只涉及MEGA。需要下文的Bun依赖和飞书登录。
+
+已有MEGA记录会复用，非空值和附件保留，因此“新增0/上传0”可能是正常结果；这不代表没有重新抓取网站。当前对应模型为MDL-155（表内名称Li Auto MEGA），配置来源ID为78129；可在试验表搜索MDL-155。没有来源的字段、业务字段仍不强填。每次运行结束打印独立证据目录。
+
+底层也支持 `select RUN_DIR --count 1 --series 6939 --exclude EXCLUSIONS_FILE`，只能选择实时发现且不在排除清单中的一个车系。
+
 准备 Bun 及项目依赖、安装并登录 lark-cli 的 `shengxu` profile。认证由 CLI 管理；本工程不保存 token。唯一可写目标在 `feishu.ts` 的 `LAB`，当前为 [车型试验Base](https://ecn4k98ibq2i.feishu.cn/base/EB60b9omTaMyZzsJ273cKdL8nkb)。生产表和其他表会被代码拒绝。表结构不由本工具修改；部署前应先建好对应 models/trims 字段。
 
 在仓库根目录执行（只需要本项目依赖与已登录的 lark-cli）：

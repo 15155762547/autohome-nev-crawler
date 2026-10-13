@@ -117,11 +117,11 @@ export async function collect(run: string, limit?: number): Promise<void> {
     full_discovery: series.length === discovery.total, success: outcomes.filter(x => x.ok).length, failed: outcomes.filter(x => !x.ok), outcomes });
   console.log(`collection success ${outcomes.filter(x => x.ok).length}; failed ${outcomes.filter(x => !x.ok).length}`);
 }
-export async function select(run: string, count: number, exclusionFile: string): Promise<void> {
+export async function select(run: string, count: number, exclusionFile: string, seriesId?: number): Promise<void> {
   if (await Bun.file(join(run, 'collection.json')).exists()) throw new Error('Use a new run directory to select a different cohort');
   const d = await load(join(run, 'discovery.json')), exclusions = await load(exclusionFile);
   if (!d.complete || exclusions.complete !== true || !Array.isArray(exclusions.series_ids)) throw new Error('Discovery/exclusion contract incomplete');
-  const ids = selectSeries(d.series.map((s: { seriesid: number }) => s.seriesid), exclusions.series_ids, count);
+  const ids = selectSeries(d.series.map((s: { seriesid: number }) => s.seriesid), exclusions.series_ids, count, seriesId);
   await save(join(run, 'selection.json'), { complete: true, requested_series: count, series_ids: ids, excluded_series_ids: exclusions.series_ids,
     exclusion_sha: sha(await Bun.file(exclusionFile).text()), discovery_sha: sha(await Bun.file(join(run, 'discovery.json')).text()), selected_at: new Date().toISOString() });
   console.log(`selected ${ids.length} series after exclusions`);
