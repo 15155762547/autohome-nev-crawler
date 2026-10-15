@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import sharp from 'sharp';
+import { createPublicFetcher, PublicAccessPaused } from '../../lib/vehicle-public-request';
 import { assertDiscovery, interpret, listingSchema, parametersSchema, type Candidate } from '../../lib/vehicle-catalog-source';
 import { selectSeries } from '../../lib/vehicle-catalog-selection';
 
@@ -12,16 +13,13 @@ export const save = async (file: string, value: unknown) => { await mkdir(join(f
 export const load = (file: string) => Bun.file(file).json();
 export type Source = { url: string; final_url: string; fetched_at: string; sha256: string; file: string; mime: string };
 export type Photo = { spec_id: number; picture_id: number; src: string; category_id: number; source_url?: string };
+export const requestIntervalMs = Number(process.env.CRAWLER_REQUEST_INTERVAL_MS ?? 5000);
+if (!Number.isInteger(requestIntervalMs) || requestIntervalMs < 5000 || requestIntervalMs > 60000) throw new Error('CRAWLER_REQUEST_INTERVAL_MS must be 5000..60000');
+const scheduledFetch = createPublicFetcher(requestIntervalMs, { request: Object.assign((...args: Parameters<typeof fetch>) => fetch(...args), { preconnect: fetch.preconnect }), now: Date.now, sleep: ms => Bun.sleep(ms) });
 export async function fetchPublic(url: string): Promise<{ raw: Uint8Array; final: string; mime: string }> {
   const host = new URL(url).hostname;
   if (!url.startsWith('https://') || !/(?:^|\.)(autohome\.com\.cn|autoimg\.cn)$/.test(host)) throw new Error('Unapproved source host');
-  for (let attempt = 0; ; attempt++) {
-    try {
-      const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json,text/html,image/*' }, signal: AbortSignal.timeout(30000) });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      return { raw: new Uint8Array(await r.arrayBuffer()), final: r.url, mime: r.headers.get('content-type') ?? '' };
-    } catch (e) { if (attempt === 2) throw e; await Bun.sleep(1000 * (attempt + 1)); }
-  }
+  return scheduledFetch(url);
 }
 export async function source(run: string, key: string, url: string): Promise<{ info: Source; raw: Uint8Array }> {
   const x = await fetchPublic(url), file = `${key}.raw`;
@@ -47,6 +45,7 @@ export async function discover(run: string): Promise<void> {
     const data = listingSchema.parse(response(x.raw));
     if (data.seriescount !== advertised.seriescount) throw new Error('Discovery count changed during pagination');
     pages.push({ ...x.info, page: p, count: data.seriesgrouplist.length }); rows.push(...data.seriesgrouplist);
+    if (p % 10 === 0 || p === Math.ceil(advertised.seriescount / 20)) console.log(`目录分页 ${p}/${Math.ceil(advertised.seriescount / 20)}`);
   }
   assertDiscovery(rows, advertised.seriescount);
   if (advertised.seriesgrouplist.some(s => !rows.some(x => x.seriesid === s.seriesid))) throw new Error('Page/API disagreement');
@@ -84,7 +83,7 @@ export function verifyUpcoming(html: string, sid: number, id: number): string {
       !/(预售|即将上市)/.test(html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/g, '').replace(/<[^>]+>/g, ''))) throw new Error('Requested spec is not a verified upcoming configuration');
   return b.specname;
 }
-export async function collect(run: string, limit?: number): Promise<void> {
+export async function collect(run: string, limit?: number, images = true): Promise<void> {
   const discovery = await load(join(run, 'discovery.json'));
   if (!discovery.complete) throw new Error('Incomplete discovery');
   const selection = await load(join(run, 'selection.json'));
@@ -104,6 +103,7 @@ export async function collect(run: string, limit?: number): Promise<void> {
           const prior = await load(file);
           for (const x of prior.sources as Source[]) if (sha(new Uint8Array(await Bun.file(join(run, x.file)).arrayBuffer())) !== x.sha256) throw new Error('Cached raw source hash mismatch');
           if (JSON.stringify(prior.upcoming_spec_ids ?? []) !== JSON.stringify(selection.upcoming_spec_ids ?? [])) throw new Error('Cached sales scope differs from selection');
+          if (images && prior.images_skipped) throw new Error('Use a new run to collect previously skipped galleries');
           if (!prior.complete) throw new Error('Incomplete cached series');
         } else {
           const sources: Source[] = [];
@@ -133,8 +133,9 @@ export async function collect(run: string, limit?: number): Promise<void> {
               const c = await source(run, key, url); sources.push(c.info);
               photos.push(...photosFromHtml(new TextDecoder().decode(c.raw), sid, specs).map(p => ({ ...p, source_url: url })));
               const unique = [...new Map(photos.map(p => [p.src, p])).values()]; photos.splice(0, photos.length, ...unique);
-            } catch (e) { imageErrors.push({ url, error: String(e) }); }
+            } catch (e) { if (e instanceof PublicAccessPaused) throw e; imageErrors.push({ url, error: String(e) }); }
           };
+          if (images) {
           await gallery(`gallery-${sid}`, `https://www.autohome.com.cn/cars/imglist-x-x-${sid}-x-x-x-x-x-x-1.html`, ids);
           for (const group of candidates) for (const cat of [1, 10]) {
             const needed = cat === 1 ? 2 : 1;
@@ -144,7 +145,8 @@ export async function collect(run: string, limit?: number): Promise<void> {
               await gallery(`gallery-${sid}-${trim.spec_id}-${cat}`, `https://www.autohome.com.cn/cars/imglist-x-x-${sid}-${trim.spec_id}-${cat}-x-x-x-x-1.html`, [trim.spec_id]);
             }
           }
-          await save(file, { complete: true, series_id: sid, name: s.seriesname, spec_ids: ids, on_sale_spec_ids: onSaleIds, upcoming_spec_ids: upcomingIds, excluded_non_nev_specs: excluded, candidates, photos, image_errors: imageErrors, sources });
+          }
+          await save(file, { complete: true, images_skipped: !images, series_id: sid, name: s.seriesname, spec_ids: ids, on_sale_spec_ids: onSaleIds, upcoming_spec_ids: upcomingIds, excluded_non_nev_specs: excluded, candidates, photos, image_errors: imageErrors, sources });
         }
         await save(join(run, `error-${sid}.json`), null);
       } catch (e) { await save(join(run, `error-${sid}.json`), { series_id: sid, error: String(e), failed_at: new Date().toISOString() }); }
@@ -155,7 +157,7 @@ export async function collect(run: string, limit?: number): Promise<void> {
     const error = await load(join(run, `error-${s.seriesid}.json`));
     return error ?? { series_id: s.seriesid, ok: true };
   }));
-  await save(join(run, 'collection.json'), { complete: outcomes.every(x => x.ok), scope: series.map((s: { seriesid: number }) => s.seriesid),
+  await save(join(run, 'collection.json'), { request_interval_ms: requestIntervalMs, source_concurrency: 1, complete: outcomes.every(x => x.ok), scope: series.map((s: { seriesid: number }) => s.seriesid),
     full_discovery: series.length === discovery.total, success: outcomes.filter(x => x.ok).length, failed: outcomes.filter(x => !x.ok), outcomes });
   console.log(`collection success ${outcomes.filter(x => x.ok).length}; failed ${outcomes.filter(x => !x.ok).length}`);
   for (const outcome of outcomes.filter(x => x.ok)) {

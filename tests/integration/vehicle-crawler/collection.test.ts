@@ -29,5 +29,13 @@ test('gallery identity errors are reported separately from successful in-sale pa
     expect(packet.photos).toHaveLength(0);
     expect(packet.image_errors).toHaveLength(3);
     expect(packet.image_errors.every((e: any) => e.error.includes('gallery identity'))).toBeTrue();
+    const skipRun = join(run, 'without-images');
+    await save(join(skipRun, 'discovery.json'), discovery);
+    await save(join(skipRun, 'selection.json'), await load(join(run, 'selection.json')));
+    const previousCalls = mocked.mock.calls.length;
+    await collect(skipRun, undefined, false);
+    const skipped = await load(join(skipRun, 'series-6939.json'));
+    expect(skipped.images_skipped).toBeTrue(); expect(skipped.photos).toHaveLength(0); expect(skipped.image_errors).toHaveLength(0);
+    expect(mocked.mock.calls.slice(previousCalls).every(args => !String(args[0]).includes('imglist'))).toBeTrue();
   } finally { mocked.mockRestore(); await rm(run, { recursive: true, force: true }); }
-});
+}, 60000);

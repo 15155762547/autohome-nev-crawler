@@ -23,7 +23,8 @@ if (command === 'select') {
 if (command === 'collect') {
   const limitIndex = rest.indexOf('--limit'); const limit = limitIndex < 0 ? undefined : Number(rest[limitIndex + 1]);
   if (limit !== undefined && (!Number.isInteger(limit) || limit <= 0)) throw new Error('Invalid limit');
-  await collect(run, limit);
+  await collect(run, limit, !rest.includes('--skip-images'));
+  if (!(await Bun.file(join(run, 'collection.json')).json()).complete) process.exitCode = 1;
 }
 if (command === 'reference') await reference(run);
 if (command === 'plan') {

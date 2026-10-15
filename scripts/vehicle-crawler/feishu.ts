@@ -408,6 +408,7 @@ export async function writeAudit(run: string, p: Plan, after: Record<Kind, Snaps
     const model = after.models.rows.find(r => r.record_id === ids.models[group.model_key])!;
     const attachment = (model.brochure_cover as { name: string; size: number }[] ?? []).map(p => ({ name: p.name, size: p.size }));
     const imageReason = group.images.length ? '本次下载校验并上传匹配配置照片，附件回读已核对。' : attachment.length ? '已有附件保留，本轮没有替换或重传。' :
+      packet.images_skipped ? '本批显式跳过图库和图片；不表示来源没有照片。' :
       p.pending.some((x: any) => x.group === group.key && x.image_error) ? '下载/图片校验失败，详见plan image_error。' :
         packet.image_errors?.length ? '图库请求或解析失败，详见series image_errors；不当作网站没有照片。' : '已查询匹配配置图库，仍未取得照片；不是全网无照片的证明。';
     for (const f of [...after.models.schema].sort((a, b) => a.name.localeCompare(b.name))) {
