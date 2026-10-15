@@ -70,7 +70,9 @@ export function auditField(table: 'models' | 'trims', key: string, field: AuditF
   } else if (field.name === 'steering_setup') {
     category = '条件不明确'; reason = present ? '保留旧左/右舵核验；文字参数接口不提供方向盘位置，本次未新增视觉核验。' : '需核对对应配置的驾驶舱照片或手册；不根据国别猜。';
   } else if (field.name === 'battery_technology') {
-    category = '枚举不适配'; reason = '化学类型NCM/LFP不是结构技术；当前结构技术选项不能据此选择，不扩枚举。';
+    const known = specs.filter(s => index && selected({ paramconflist: s.raw }, index, '电池特有技术') === '刀片电池').length;
+    category = mapped ? '程序转换' : known ? '条件不明确' : '来源未披露';
+    reason = mapped ? '来源明确刀片电池，映射为已有枚举Blade。' : `本组${specs.length}款中${known}款明确刀片电池；并非全部配置都已披露同一技术，共享字段留空。化学类型LFP不能代替结构技术证据。`;
   } else if (field.name === 'airbags' && !mapped) {
     category = '条件不明确'; reason = '分区标配/选装标记不等于明确总数量；不猜测相加。';
   } else if (mapped) {
@@ -80,8 +82,11 @@ export function auditField(table: 'models' | 'trims', key: string, field: AuditF
       table === 'models' && names.length ? '依据来源值映射；车型标量要求同组配置一致，范围字段取最小/最大值。' : '依据对应在售配置的来源值和字段定义映射。';
   } else if (names.length) {
     const values = specs.flatMap(s => names.map(n => index ? selected({ paramconflist: s.raw }, index, n) : '')).filter(meaningful);
-    category = values.length ? field.type === 'select' ? '枚举不适配' : '条件不明确' : '来源未披露';
+    const knownSpecs = specs.filter(s => names.some(n => index && meaningful(selected({ paramconflist: s.raw }, index, n)))).length;
+    category = values.length ? knownSpecs < specs.length ? '条件不明确' : field.type === 'select' ? '枚举不适配' : '条件不明确' : '来源未披露';
     reason = !values.length ? `本次对应配置没有返回有效的${names.join('、')}；不是全网不存在，也不是业务人员猜填。` :
+      knownSpecs < specs.length ? `本组${specs.length}款中${knownSpecs}款返回有效${names.join('、')}，其余未披露；已有参数仅适用于有证据的配置，不能推广到全组。` :
+      table === 'models' && new Set(values).size > 1 ? `本组${names.join('、')}存在不同值：${[...new Set(values)].join('/')}；单值字段不能表达差异，各配置原值保留在摘要中。` :
       field.type === 'select' ? `来源${names.join('、')}返回${[...new Set(values)].join('/')}，没有已核实的目标枚举映射，不猜填电机布局/结构类型。` :
       field.name === 'ac_slow_charge_full_time_hours' ? '未同时获得慢充时长与明确0–100%电量窗口，不推算全充时间。' :
         '来源存在值，但同组不同、单位/条件不明确或当前解析不接受该格式；原值保留，待核对。';

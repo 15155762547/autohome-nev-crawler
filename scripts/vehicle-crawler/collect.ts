@@ -75,6 +75,15 @@ export function photosFromHtml(html: string, sid: number, ids: number[]): Photo[
   }
   return [...new Map(out.map(x => [x.src, x])).values()];
 }
+/** State 10 alone is insufficient: verify the requested spec page identity and visible launch label. */
+export function verifyUpcoming(html: string, sid: number, id: number): string {
+  const m = /<script id="__NEXT_DATA__"[^>]*>(.*?)<\/script>/.exec(html);
+  if (!m) throw new Error('Upcoming page structure changed');
+  const p = JSON.parse(m[1]).props.pageProps, b = p.specDetails?.bread, info = p.specDetails?.specinfo;
+  if (p.seriesId !== sid || p.specId !== id || b?.seriesid !== sid || b?.specid !== id || info?.id !== id || info?.specstate !== 10 ||
+      !/(预售|即将上市)/.test(html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/g, '').replace(/<[^>]+>/g, ''))) throw new Error('Requested spec is not a verified upcoming configuration');
+  return b.specname;
+}
 export async function collect(run: string, limit?: number): Promise<void> {
   const discovery = await load(join(run, 'discovery.json'));
   if (!discovery.complete) throw new Error('Incomplete discovery');
@@ -94,6 +103,7 @@ export async function collect(run: string, limit?: number): Promise<void> {
         if (await Bun.file(file).exists()) {
           const prior = await load(file);
           for (const x of prior.sources as Source[]) if (sha(new Uint8Array(await Bun.file(join(run, x.file)).arrayBuffer())) !== x.sha256) throw new Error('Cached raw source hash mismatch');
+          if (JSON.stringify(prior.upcoming_spec_ids ?? []) !== JSON.stringify(selection.upcoming_spec_ids ?? [])) throw new Error('Cached sales scope differs from selection');
           if (!prior.complete) throw new Error('Incomplete cached series');
         } else {
           const sources: Source[] = [];
@@ -108,6 +118,13 @@ export async function collect(run: string, limit?: number): Promise<void> {
             params = parametersSchema.parse(response(b.raw));
           }
           if (params.bread.seriesid !== sid) throw new Error('Wrong parameter series identity');
+          const onSaleIds = [...ids], upcomingIds: number[] = selection.upcoming_spec_ids ?? [];
+          for (const id of upcomingIds) {
+            if (ids.includes(id) || !params.datalist.some(p => p.specid === id && p.specstatus === 10)) throw new Error('Requested upcoming spec absent or already in sale');
+            const proof = await source(run, `upcoming-${sid}-${id}`, `https://www.autohome.com.cn/spec/${id}/`); sources.push(proof.info);
+            verifyUpcoming(new TextDecoder().decode(proof.raw), sid, id);
+            ids.push(id);
+          }
           const candidates = interpret(params, ids, b.info.fetched_at);
           const excluded = ids.filter(id => !candidates.some(g => g.trims.some(t => t.spec_id === id)));
           const photos: Photo[] = [], imageErrors: { url: string; error: string }[] = [];
@@ -127,7 +144,7 @@ export async function collect(run: string, limit?: number): Promise<void> {
               await gallery(`gallery-${sid}-${trim.spec_id}-${cat}`, `https://www.autohome.com.cn/cars/imglist-x-x-${sid}-${trim.spec_id}-${cat}-x-x-x-x-1.html`, [trim.spec_id]);
             }
           }
-          await save(file, { complete: true, series_id: sid, name: s.seriesname, spec_ids: ids, excluded_non_nev_specs: excluded, candidates, photos, image_errors: imageErrors, sources });
+          await save(file, { complete: true, series_id: sid, name: s.seriesname, spec_ids: ids, on_sale_spec_ids: onSaleIds, upcoming_spec_ids: upcomingIds, excluded_non_nev_specs: excluded, candidates, photos, image_errors: imageErrors, sources });
         }
         await save(join(run, `error-${sid}.json`), null);
       } catch (e) { await save(join(run, `error-${sid}.json`), { series_id: sid, error: String(e), failed_at: new Date().toISOString() }); }
@@ -146,12 +163,13 @@ export async function collect(run: string, limit?: number): Promise<void> {
     console.log('参数/图库', { name: packet.name, specs: packet.spec_ids.length, image_candidates: packet.photos.length, gallery_errors: packet.image_errors?.length ?? 0 });
   }
 }
-export async function select(run: string, count: number, exclusionFile: string, seriesId?: number | number[]): Promise<void> {
+export async function select(run: string, count: number, exclusionFile: string, seriesId?: number | number[], upcomingSpecIds: number[] = []): Promise<void> {
   if (await Bun.file(join(run, 'collection.json')).exists()) throw new Error('Use a new run directory to select a different cohort');
   const d = await load(join(run, 'discovery.json')), exclusions = await load(exclusionFile);
   if (!d.complete || exclusions.complete !== true || !Array.isArray(exclusions.series_ids)) throw new Error('Discovery/exclusion contract incomplete');
   const ids = selectSeries(d.series.map((s: { seriesid: number }) => s.seriesid), exclusions.series_ids, count, seriesId);
-  await save(join(run, 'selection.json'), { complete: true, requested_series: count, series_ids: ids, excluded_series_ids: exclusions.series_ids,
+  if (upcomingSpecIds.length && (ids.length !== 1 || upcomingSpecIds.some(id => !Number.isInteger(id) || id <= 0) || new Set(upcomingSpecIds).size !== upcomingSpecIds.length)) throw new Error('Upcoming selection requires one series and unique positive spec IDs');
+  await save(join(run, 'selection.json'), { complete: true, upcoming_spec_ids: upcomingSpecIds, requested_series: count, series_ids: ids, excluded_series_ids: exclusions.series_ids,
     exclusion_sha: sha(await Bun.file(exclusionFile).text()), discovery_sha: sha(await Bun.file(join(run, 'discovery.json')).text()), selected_at: new Date().toISOString() });
   console.log(`selected ${ids.length} series after exclusions`);
 }

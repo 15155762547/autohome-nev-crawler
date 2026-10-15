@@ -13,7 +13,7 @@ test('field audit distinguishes source, business, formulas and unsupported struc
   expect(audit('voltage_platform_v', 'number', 800, group.model.voltage_platform_v).category).toBe('公开事实');
   expect(audit('boot_volume_l', 'number').category).toBe('来源未披露');
   expect(audit('airbags', 'number').category).toBe('条件不明确');
-  expect(audit('battery_technology', 'select').category).toBe('枚举不适配');
+  expect(audit('battery_technology', 'select').category).toBe('来源未披露');
   expect(audit('Recommendation', 'select').category).toBe('公司业务');
   expect(audit('battery_capacity_min_kwh_auto', 'formula', '108').category).toBe('公式');
   expect(audit('i18n_translations', 'link').category).toBe('程序转换');

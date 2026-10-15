@@ -18,7 +18,7 @@ if (command === 'select') {
   const seriesIds = list === undefined ? value('--series') === undefined ? undefined : Number(value('--series')) : list.split(',').map(x => x.trim() ? Number(x) : NaN);
   const count = Array.isArray(seriesIds) ? seriesIds.length : Number(value('--count'));
   if (!exclude || (!list && !rest.includes('--count'))) throw new Error('Select requires --exclude and --count or --series-ids');
-  await select(run, count, resolve(exclude), seriesIds);
+  await select(run, count, resolve(exclude), seriesIds, value('--upcoming-spec-ids')?.split(',').map(Number) ?? []);
 }
 if (command === 'collect') {
   const limitIndex = rest.indexOf('--limit'); const limit = limitIndex < 0 ? undefined : Number(rest[limitIndex + 1]);
@@ -31,7 +31,7 @@ if (command === 'plan') {
   if (i >= 0 && !rest[i + 1]) throw new Error('Missing company reference file');
   const file = i >= 0 ? resolve(rest[i + 1]) : await Bun.file(join(run, 'company-reference.json')).exists() ? join(run, 'company-reference.json') : undefined;
   if (!file && (await Bun.file(join(run, 'selection.json')).json()).series_ids.includes(8171)) throw new Error('Ti7 requires reference RUN before planning');
-  await plan(run, !rest.includes('--skip-images'), rest.includes('--allow-partial'), file, rest.includes('--align-existing'));
+  await plan(run, !rest.includes('--skip-images'), rest.includes('--allow-partial'), file, rest.includes('--align-existing'), rest.includes('--refresh-seagull-scope'));
 }
 if (command === 'apply') await apply(run);
 if (command === 'verify') await verify(run);

@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { empty, interpret, matchesFormulaNumber, mergeParentGroups, protectedFields, same, sourceIdentity, type Candidate, type Cells } from '../../lib/vehicle-catalog-source';
 import { load, save, sha, downloadPhotos, type Source } from './collect';
 import { auditField, auditNotes, csvAudit, maintainedFields, reconcileMaintained, type AuditEntry } from '../../lib/vehicle-catalog-audit';
-import { referenceSchema, assertReference, companyCandidates, alignmentPatch, alignmentFields, type CompanyReference, type Retirement } from '../../lib/vehicle-company-reference';
+import { referenceSchema, assertReference, companyCandidates, alignmentPatch, alignmentFields, seagullScopePatch, seagullScopeFields, type CompanyReference, type Retirement } from '../../lib/vehicle-company-reference';
 
 export const LAB = { base_token: 'EB60b9omTaMyZzsJ273cKdL8nkb', profile: 'shengxu',
   tables: { models: 'tblzyug797w8obPF', trims: 'tbljGsW6q0bvSxri' } } as const;
@@ -16,6 +16,7 @@ type Planned = { key: string; prior_id?: string; fields: Cells; model_key?: stri
 export type Plan = { target: typeof LAB; source_sha: string; selection_sha: string; before: Record<Kind, Snapshot>; creates: Record<Kind, Planned[]>;
   updates: Record<Kind, Planned[]>; model_ids: Record<string, string>; conflicts: unknown[]; pending: unknown[];
     groups: { key: string; model_key: string; series_id: number; spec_ids: number[]; images: Awaited<ReturnType<typeof downloadPhotos>> }[];
+  refresh_seagull_scope?: boolean;
   alignment?: { reference: CompanyReference; reference_sha: string; align_existing: boolean; retired: Retirement[] } };
 
 export function guardWrite(args: string[]): void {
@@ -86,7 +87,7 @@ function unique(rows: Cells[], key: (r: Cells) => string | null): Map<string, Ce
   for (const row of rows) { const k = key(row); if (!k) throw new Error('Unresolved existing source identity'); if (m.has(k)) throw new Error(`Duplicate existing key ${k}`); m.set(k, row); }
   return m;
 }
-export async function plan(run: string, images = true, allowPartial = false, companyFile?: string, alignExisting = false): Promise<void> {
+export async function plan(run: string, images = true, allowPartial = false, companyFile?: string, alignExisting = false, refreshSeagullScope = false): Promise<void> {
   const collection = await load(join(run, 'collection.json'));
   const selection = await load(join(run, 'selection.json'));
   if (!same(collection.scope, selection.series_ids) || !selection.complete || collection.scope.some((sid: number) => selection.excluded_series_ids.includes(sid))) throw new Error('Collection differs from the approved bounded selection');
@@ -106,9 +107,14 @@ export async function plan(run: string, images = true, allowPartial = false, com
     if (alignExisting && !same(selection.series_ids, [8171])) throw new Error('Existing-record migration is authorized only for Ti7');
     p.alignment = { reference: ref, reference_sha: sha(JSON.stringify(ref)), align_existing: alignExisting, retired: [] };
   }
+  if (refreshSeagullScope) {
+    if (!p.alignment || !same(selection.series_ids, [6762]) || !same(selection.upcoming_spec_ids, [78508])) throw new Error('Seagull scope refresh requires company reference and explicit 6762 / 78508 selection');
+    p.refresh_seagull_scope = true;
+  }
   const add = (kind: Kind, key: string, desired: Cells, prior?: Cells, modelKey?: string) => {
     const { patch, conflicts } = reconcileMaintained(prior, desired);
     const overrides = p.alignment?.align_existing ? alignmentPatch(kind, prior, desired) : {};
+    if (p.refresh_seagull_scope && kind === 'models') Object.assign(overrides, seagullScopePatch(prior, desired));
     Object.assign(patch, overrides);
     p.conflicts.push(...conflicts.filter(c => !(c.field in overrides)).map(c => ({ table: kind, key, ...c })));
     validateFields(patch, before[kind].schema);
@@ -122,6 +128,7 @@ export async function plan(run: string, images = true, allowPartial = false, com
     if (collection.failed.some((x: { series_id: number }) => x.series_id === sid)) continue;
     const packet = await load(join(run, `series-${sid}.json`));
     for (const s of packet.sources as Source[]) if (sha(new Uint8Array(await Bun.file(join(run, s.file)).arrayBuffer())) !== s.sha256) throw new Error('Source hash changed before planning');
+    if (!same(packet.upcoming_spec_ids ?? [], selection.upcoming_spec_ids ?? [])) throw new Error('Packet sales scope differs from selection');
     // Mapping is rerunnable from preserved raw responses when rules evolve; collection stays immutable.
     const parameter = (packet.sources as Source[]).filter(s => s.url.includes('getParamConf')).at(-1)!;
     const raw = await load(join(run, parameter.file));
@@ -154,6 +161,7 @@ export async function plan(run: string, images = true, allowPartial = false, com
       }
       if (!p.alignment && modelKey.startsWith('MDL-') && !prior) throw new Error('Orphan existing trim');
       const desired: Cells = { ...g.model, model_id: modelKey };
+      if (p.refresh_seagull_scope) for (const f of ['length_mm', 'width_mm', 'height_mm', 'wheelbase_mm']) if (!(f in desired)) desired[f] = null;
       let photoList: Awaited<ReturnType<typeof downloadPhotos>> = [];
       if (images && empty(prior?.brochure_cover)) {
         try { photoList = await downloadPhotos(run, g, packet.photos); }
@@ -171,11 +179,15 @@ export async function plan(run: string, images = true, allowPartial = false, com
       const missing = before.models.schema.filter(f => !['formula', 'link'].includes(f.type)).map(f => auditField('models', modelKey, f,
         f.name in desired ? desired[f.name] : prior?.[f.name], desired[f.name], g, parameter.url)).filter(e =>
         !(p.alignment && e.field === 'model_year') && ['来源未披露', '条件不明确', '枚举不适配', '代码未覆盖'].includes(e.category));
+      const scopeNote = p.refresh_seagull_scope ? `销售范围：${packet.on_sale_spec_ids.length}款在售 + ${packet.upcoming_spec_ids.length}款预售/即将上市（${packet.upcoming_spec_ids.join(',')}）。预售价格和未披露参数留空。\n新旧尺寸不同，models共享尺寸留空，各款尺寸/座位数保存在base_spec_summary_json。\n后备厢930L、对外放电及3.3kW仅适用于原8款已披露配置，不能推及预售款；8款刀片电池明确，预售未披露，共享技术字段留空。\n78508公司英文名历史年款已按来源改为2027，名称其余部分沿用公司；model_year为公司展示年款，不代表全部配置。\n` : '';
       desired.review_notes = auditNotes(prior?.review_notes, `来源：${parameter.url}\n来源采集时间：${parameter.fetched_at}\n本组配置：${currentIds.join(',')}\n` +
-        missing.sort((a, b) => a.field.localeCompare(b.field)).map(e => `${e.field}：${e.reason}`).join('\n'));
+        scopeNote + missing.sort((a, b) => a.field.localeCompare(b.field)).map(e => `${e.field}：${e.reason}`).join('\n'));
       add('models', modelKey, desired, prior);
       for (const t of g.trims) {
         const key = `${sid}/${t.spec_id}`, old = trims.get(key);
+        if (packet.upcoming_spec_ids?.includes(t.spec_id)) {
+          t.fields.notes = String(t.fields.notes) + ` Sales status: upcoming / 预售; verified https://www.autohome.com.cn/spec/${t.spec_id}/ ; unknown price and undisclosed values left blank. Company historical English alias: ${p.alignment?.reference.models.flatMap(m => m.specs).find(s => s.spec_id === t.spec_id)?.trim ?? ''}.`;
+        }
         if (old && !p.alignment?.align_existing && !empty(old.vehicle_model_pruned) && !same(old.vehicle_model_pruned, [{ id: prior?.record_id }])) throw new Error(`Existing parent link disagrees with model_id: ${key}`);
         const record: Cells = { ...t.fields, model_id: modelKey, trim_config_id: p.alignment ? t.fields.trim_config_id : old?.trim_config_id ?? t.fields.trim_config_id };
         const fid = before.trims.schema.find(f => f.name === 'record_id')!.id;
@@ -322,6 +334,7 @@ export async function verify(run: string): Promise<void> {
         if (['formula', 'link', 'updated_at', 'updated_by'].includes(f.type) || empty(old[f.name]) || old[f.name] === false) continue;
         if (maintainedFields.has(f.name) && [...p.creates[kind], ...p.updates[kind]].some(r => r.prior_id === old.record_id && f.name in r.fields)) continue;
         if (p.alignment?.align_existing && alignmentFields[kind].has(f.name) && p.updates[kind].some(r => r.prior_id === old.record_id && (f.name in r.fields || f.id in r.fields))) continue;
+        if (p.refresh_seagull_scope && kind === 'models' && old.model_id === 'MDL-002' && seagullScopeFields.has(f.name) && p.updates.models.some(r => r.prior_id === old.record_id && f.name in r.fields)) continue;
         if (kind === 'models' && f.name === 'last_synced_at' && receipt.synced_model_ids?.includes(old.record_id)) continue;
         if (!same(old[f.name], actual[f.name])) mismatches.push({ existing_value_changed: old.record_id, field: f.name });
       }
@@ -429,7 +442,7 @@ export async function writeAudit(run: string, p: Plan, after: Record<Kind, Snaps
       }
     }
     const needs = entries.filter(e => e.table === 'models' && e.key === group.model_key && (empty(e.actual) || e.field === 'household_charging' && e.actual === false));
-    summary.push(`## ${packet.name} / ${group.model_key}`, '', `本组${group.spec_ids.length}个在售配置；附件${attachment.length}张；待解释字段${needs.length}个。`, '', imageReason, '',
+    summary.push(`## ${packet.name} / ${group.model_key}`, '', `本组${group.spec_ids.length}个配置（在售${packet.on_sale_spec_ids?.length ?? group.spec_ids.length}，预售${packet.upcoming_spec_ids?.length ?? 0}）；附件${attachment.length}张；待解释字段${needs.length}个。`, '', imageReason, '',
       ...needs.map(e => `- ${e.field}（${e.label}）：${e.category}；${e.reason}`), '');
   }
   await save(join(run, 'field-audit.json'), entries); await Bun.write(join(run, 'field-audit.csv'), csvAudit(entries));

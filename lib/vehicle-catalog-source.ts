@@ -106,6 +106,7 @@ export function interpret(input: unknown, allowed: number[], fetched: string): C
       const ns = values(n).map(numeric);
       if (ns.every(x => x !== null)) { model[`${stem}_min${stem === 'seats' ? '' : '_kmh'}`] = Math.min(...ns as number[]); model[`${stem}_max${stem === 'seats' ? '' : '_kmh'}`] = Math.max(...ns as number[]); }
     }
+    if (values('电池特有技术').every(x => x === '刀片电池')) model.battery_technology = ['Blade'];
     if (values('级别').every(x => x && x === values('级别')[0])) model.vehicle_class = values('级别')[0];
     for (const [field, name] of [['sunroof_availability', '天窗类型'], ['v2l_availability', '对外放电']]) {
       const states = specs.map(s => { const c = s.paramconflist.find(x => x.titleid === index[name]); const marks = [c?.itemname, ...(c?.sublist ?? []).map(x => x.value)]; return marks.includes('●') ? 'Standard' : marks.includes('○') ? 'Optional' : null; });

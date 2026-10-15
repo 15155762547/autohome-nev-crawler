@@ -44,10 +44,11 @@ export function companyCandidates(groups: Candidate[], ref: CompanyReference): C
     });
     const g = sourceGroups.length === 1 ? { ...sourceGroups[0], model: { ...sourceGroups[0].model } } : mergeParentGroups(sourceGroups);
     g.key = key; g.model = { ...g.model, ...m.fields };
-    g.trims = [...g.trims].sort((a, b) => Number(a.fields.trim_price_rmb) - Number(b.fields.trim_price_rmb) || a.spec_id - b.spec_id).map((t, i) => {
+    g.trims = [...g.trims].sort((a, b) => (typeof a.fields.trim_price_rmb === 'number' ? a.fields.trim_price_rmb : Infinity) - (typeof b.fields.trim_price_rmb === 'number' ? b.fields.trim_price_rmb : Infinity) || a.spec_id - b.spec_id).map((t, i) => {
       const r = m.specs.find(s => s.spec_id === t.spec_id)!;
-      if (typeof t.fields.trim_price_rmb !== 'number') throw new Error('Cannot order unpriced company configuration');
-      return { ...t, fields: { ...t.fields, trim: r.trim, trim_config_id: r.trim_config_id, trim_order: i + 1, trim_price_display: Math.round(t.fields.trim_price_rmb / 6.74) } };
+      const sourceYear = /source name: (\d{4})款/.exec(String(t.fields.notes ?? ''))?.[1];
+      const name = sourceYear ? r.trim.replace(/^\d{4}(?= MY\b)/, sourceYear) : r.trim;
+      return { ...t, fields: { ...t.fields, trim: name, trim_config_id: r.trim_config_id, trim_order: i + 1, ...(typeof t.fields.trim_price_rmb === 'number' ? { trim_price_display: Math.round(t.fields.trim_price_rmb / 6.74) } : {}) } };
     });
     return g;
   });
@@ -60,4 +61,11 @@ export function assertRetirement(retired: Retirement, approved: Retirement[], ch
   if (!backupValid || children.length || !approved.some(r => same(r, retired)) || !/^AUT-8171-2026-PHEV$/.test(retired.model_id)) {
     throw new Error('Retirement requires verified backup, exact approved Ti7 duplicate and zero remaining links');
   }
+}
+
+/** Explicit one-product scope refresh; ordinary sync still protects nonempty values. */
+export const seagullScopeFields = new Set(['length_mm', 'width_mm', 'height_mm', 'wheelbase_mm', 'seats_min', 'seats_max', 'top_speed_min_kmh', 'top_speed_max_kmh', 'common_features_json_pruned', 'charging']);
+export function seagullScopePatch(old: Cells | undefined, desired: Cells): Cells {
+  if (desired.model_id !== 'MDL-002') throw new Error('Scope refresh is limited to BYD Seagull MDL-002');
+  return Object.fromEntries([...seagullScopeFields].filter(f => f in desired && !same(old?.[f], desired[f])).map(f => [f, desired[f]]));
 }
