@@ -176,7 +176,7 @@ export async function plan(run: string, images = true, allowPartial = false, com
         }
         if (prior && !p.alignment.align_existing && prior.model_id !== modelKey) throw new Error('Company identity mismatch');
       }
-      if (!p.alignment && modelKey.startsWith('MDL-') && !prior) throw new Error('Orphan existing trim');
+      if (!p.alignment && !p.catalogue && modelKey.startsWith('MDL-') && !prior) throw new Error('Orphan existing trim');
       const desired: Cells = { ...g.model, model_id: modelKey };
       if (p.refresh_seagull_scope) for (const f of ['length_mm', 'width_mm', 'height_mm', 'wheelbase_mm']) if (!(f in desired)) desired[f] = null;
       let photoList: Awaited<ReturnType<typeof downloadPhotos>> = [];
