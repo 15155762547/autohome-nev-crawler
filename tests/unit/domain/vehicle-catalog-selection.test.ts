@@ -12,3 +12,9 @@ test('single series selection keeps exclusions and in-sale discovery binding', (
   expect(() => selectSeries([1, 2], [], 2, 2)).toThrow();
   expect(() => selectSeries([1, 2], [], 1, NaN)).toThrow();
 });
+test('explicit batch keeps requested order and rejects duplicates, absent or excluded IDs', () => {
+  expect(selectSeries([1, 2, 3], [], 2, [3, 1])).toEqual([3, 1]);
+  for (const ids of [[1, 1], [1, 4], [1, NaN]]) expect(() => selectSeries([1, 2, 3], [], 2, ids)).toThrow();
+  expect(() => selectSeries([1, 2, 3], [2], 2, [1, 2])).toThrow();
+  expect(() => selectSeries([1, 2], [], 1, [1, 2])).toThrow();
+});

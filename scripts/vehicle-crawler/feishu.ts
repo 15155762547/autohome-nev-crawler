@@ -1,8 +1,9 @@
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { empty, interpret, matchesFormulaNumber, mergeParentGroups, protectedFields, reconcile, same, sourceIdentity, type Candidate, type Cells } from '../../lib/vehicle-catalog-source';
+import { empty, interpret, matchesFormulaNumber, mergeParentGroups, protectedFields, same, sourceIdentity, type Candidate, type Cells } from '../../lib/vehicle-catalog-source';
 import { load, save, sha, downloadPhotos, type Source } from './collect';
+import { auditField, auditNotes, csvAudit, maintainedFields, reconcileMaintained, type AuditEntry } from '../../lib/vehicle-catalog-audit';
 
 export const LAB = { base_token: 'EB60b9omTaMyZzsJ273cKdL8nkb', profile: 'shengxu',
   tables: { models: 'tblzyug797w8obPF', trims: 'tbljGsW6q0bvSxri' } } as const;
@@ -96,7 +97,7 @@ export async function plan(run: string, images = true, allowPartial = false): Pr
   const p: Plan = { target: LAB, source_sha: sha(await Bun.file(join(run, 'collection.json')).text()), selection_sha: sha(await Bun.file(join(run, 'selection.json')).text()), before,
     creates: { models: [], trims: [] }, updates: { models: [], trims: [] }, model_ids: {}, conflicts: [], pending: [], groups: [] };
   const add = (kind: Kind, key: string, desired: Cells, prior?: Cells, modelKey?: string) => {
-    const { patch, conflicts } = reconcile(prior, desired);
+    const { patch, conflicts } = reconcileMaintained(prior, desired);
     p.conflicts.push(...conflicts.map(c => ({ table: kind, key, ...c })));
     validateFields(patch, before[kind].schema);
     const record = { key, prior_id: prior?.record_id as string | undefined, fields: patch, model_key: modelKey };
@@ -125,7 +126,7 @@ export async function plan(run: string, images = true, allowPartial = false): Pr
     for (const [modelKey, related] of assigned) {
       const g = related.length === 1 ? related[0] : mergeParentGroups(related), prior = models.get(modelKey);
       if (modelKey.startsWith('MDL-') && !prior) throw new Error('Orphan existing trim');
-      const desired = { ...g.model, model_id: modelKey };
+      const desired: Cells = { ...g.model, model_id: modelKey };
       let photoList: Awaited<ReturnType<typeof downloadPhotos>> = [];
       if (images && empty(prior?.brochure_cover)) {
         try { photoList = await downloadPhotos(run, g, packet.photos); }
@@ -134,6 +135,16 @@ export async function plan(run: string, images = true, allowPartial = false): Pr
       if (photoList.length) {
         Object.assign(desired, { image_url: photoList[0].src, gallery_images_json: JSON.stringify(photoList.map(p => ({ src: p.src, cat: p.category_id === 1 ? 'Exterior' : 'Interior', label: `${packet.name}; spec ${p.spec_id}`, spec_id: p.spec_id }))) });
       }
+      const currentIds = g.trims.map(t => t.spec_id);
+      const linkedIds = (prior?.trim_configurations_pruned as { id: string }[] ?? []).map(x => x.id);
+      const oldChildren = g.trims.map(t => trims.get(`${sid}/${t.spec_id}`)?.record_id);
+      Object.assign(desired, { trim_last_verified_at: parameter.fetched_at,
+        trim_section_status_pruned: [linkedIds.some(id => !oldChildren.includes(id)) ? 'Partial' : 'Verified'],
+        trim_source_summary_pruned: `Autohome series ${sid}; current group specs ${currentIds.join(',')}; source fetched ${parameter.fetched_at}; Chinese source names retained.` });
+      const missing = before.models.schema.filter(f => !['formula', 'link'].includes(f.type)).map(f => auditField('models', modelKey, f,
+        desired[f.name] ?? prior?.[f.name], desired[f.name], g, parameter.url)).filter(e => ['来源未披露', '条件不明确', '枚举不适配', '代码未覆盖'].includes(e.category));
+      desired.review_notes = auditNotes(prior?.review_notes, `来源：${parameter.url}\n来源采集时间：${parameter.fetched_at}\n本组配置：${currentIds.join(',')}\n` +
+        missing.sort((a, b) => a.field.localeCompare(b.field)).map(e => `${e.field}：${e.reason}`).join('\n'));
       add('models', modelKey, desired, prior);
       for (const t of g.trims) {
         const key = `${sid}/${t.spec_id}`, old = trims.get(key);
@@ -144,13 +155,15 @@ export async function plan(run: string, images = true, allowPartial = false): Pr
         add('trims', key, record, old, modelKey);
       }
       p.groups.push({ key: g.key, model_key: modelKey, series_id: sid, spec_ids: g.trims.map(t => t.spec_id), images: photoList });
-      // Every destination field receives a disposition, including formula/business/conditional fields.
+      // Use the same field classifications for planning and final read-back audit.
       for (const kind of ['models', 'trims'] as const) for (const f of before[kind].schema) {
-        const candidates = kind === 'models' ? [desired[f.name as keyof typeof desired]] : g.trims.map(t => t.fields[f.name]);
-        p.pending.push({ group: g.key, table: kind, field: f.name, disposition: f.type === 'formula' ? 'Feishu formula' : protectedFields.has(f.name) ? 'Business protected' :
-          candidates.some(x => !empty(x)) ? 'Source mapped; nonempty target preserved' : f.type === 'link' || ['model_id', 'record_id', 'trim_configurations_pruned'].includes(f.name) ? 'Program identity/link' :
-          f.name === 'brochure_cover' ? photoList.length ? 'Validated image upload' : 'Existing attachment preserved or exact image unavailable' : 'NOT_RETURNED or conditions differ; see raw parameters',
-          values: candidates });
+        if (kind === 'models') {
+          const entry = auditField(kind, modelKey, f, prior?.[f.name], desired[f.name], g, parameter.url);
+          p.pending.push({ group: g.key, table: kind, field: f.name, disposition: entry.category, reason: entry.reason });
+        } else for (const t of g.trims) {
+          const entry = auditField(kind, `${sid}/${t.spec_id}`, f, trims.get(`${sid}/${t.spec_id}`)?.[f.name], t.fields[f.name], g, parameter.url, t.spec_id);
+          p.pending.push({ group: g.key, spec_id: t.spec_id, table: kind, field: f.name, disposition: entry.category, reason: entry.reason });
+        }
       }
     }
     if (p.groups.length % 50 < assigned.size) console.log(`planned ${p.groups.length} model groups`);
@@ -229,6 +242,22 @@ export async function apply(run: string): Promise<void> {
     }
     if (!visible) throw new Error('Attachment write not yet visible; inspect receipt and replan without reupload');
   }
+  const changed = p.groups.filter(g => g.images.length || p.creates.models.some(r => r.key === g.model_key) || p.updates.models.some(r => r.key === g.model_key) ||
+    [...p.creates.trims, ...p.updates.trims].some(r => r.model_key === g.model_key));
+  const syncedAt = new Date().toISOString(), syncedIds = [...new Set(changed.map(g => ids.models[g.model_key]))];
+  if (syncedIds.length) {
+    const current = (await call(['+record-get', ...args('models'), '--field-id', 'last_synced_at', '--format', 'json',
+      ...syncedIds.flatMap(id => ['--record-id', id])])).data;
+    if (current.has_more || current.record_id_list.length !== syncedIds.length) throw new Error('Missing sync-time target');
+    current.record_id_list.forEach((id: string, i: number) => {
+      const old = fresh.models.rows.find(r => r.record_id === id)?.last_synced_at;
+      if (!empty(current.data[i][0]) && !same(current.data[i][0], old)) throw new Error('Concurrent synchronization timestamp edit');
+    });
+    const r = await call(['+record-batch-update', ...args('models')], true, { update_records: Object.fromEntries(syncedIds.map(id => [id, { last_synced_at: syncedAt }])) });
+    if (!same([...r.data.record_id_list].sort(), [...syncedIds].sort())) throw new Error('Incomplete synchronization timestamp receipt');
+    await save(join(run, 'sync-time-receipt.json'), r);
+  }
+  Object.assign(receipt, { sync_time: syncedAt, synced_model_ids: syncedIds }); await save(join(run, 'apply.json'), receipt);
   console.log('applied', { created: receipt.created, updated: receipt.updated, uploads: receipt.uploads });
 }
 export async function verify(run: string): Promise<void> {
@@ -250,11 +279,14 @@ export async function verify(run: string): Promise<void> {
       if (!actual) { mismatches.push({ missing_existing_record: old.record_id }); continue; }
       for (const f of p.before[kind].schema) {
         if (['formula', 'link', 'updated_at', 'updated_by'].includes(f.type) || empty(old[f.name]) || old[f.name] === false) continue;
+        if (maintainedFields.has(f.name) && [...p.creates[kind], ...p.updates[kind]].some(r => r.prior_id === old.record_id && f.name in r.fields)) continue;
+        if (kind === 'models' && f.name === 'last_synced_at' && receipt.synced_model_ids?.includes(old.record_id)) continue;
         if (!same(old[f.name], actual[f.name])) mismatches.push({ existing_value_changed: old.record_id, field: f.name });
       }
     }
   }
   let formulaChecks = 0, formulaMissing = 0;
+  for (const rid of receipt.synced_model_ids ?? []) if (!same(byId.models.get(rid)?.last_synced_at, receipt.sync_time)) mismatches.push({ synchronization_time: rid });
   for (const g of p.groups) {
     const model = byId.models.get(receipt.ids.models[g.model_key])!;
     const children = g.spec_ids.map(spec => byId.trims.get(receipt.ids.trims[`${g.series_id}/${spec}`]));
@@ -291,15 +323,60 @@ export async function verify(run: string): Promise<void> {
       excluded_specs: packet.excluded_non_nev_specs, image_records: groups.filter(g => g.images.length).length });
   }
   const covered = new Set(p.groups.flatMap(g => g.spec_ids.map(id => `${g.series_id}/${id}`)));
+  const imageCoverage = p.groups.map(g => ({ model: g.model_key, attachments: (byId.models.get(receipt.ids.models[g.model_key])!.brochure_cover as unknown[] ?? []).length }));
   const result = { ok: !mismatches.length, discovered_series: (await load(join(run, 'discovery.json'))).total, collected_series: collection.success,
     selected_series: (await load(join(run, 'selection.json'))).requested_series, scoped_models: new Set(p.groups.map(g => g.model_key)).size,
     full_discovery: collection.full_discovery, source_complete: collection.complete, failed_series: collection.failed, groups: p.groups.length, mapped_specs: p.groups.reduce((n, g) => n + g.spec_ids.length, 0),
     lab_models: after.models.rows.length, lab_trims: after.trims.rows.length, created: receipt.created, updated: receipt.updated, uploads: receipt.uploads,
     formula_checks: formulaChecks, formula_missing_inputs_or_values: formulaMissing, conflicts_preserved: p.conflicts.length,
-    image_errors: p.pending.filter((x: any) => x.image_error), retained_trims_outside_current_scope: after.trims.rows.filter(r => !covered.has(sourceIdentity(r)!)).map(r => r.trim_config_id), mismatches };
+    image_errors: p.pending.filter((x: any) => x.image_error), image_coverage: imageCoverage,
+    retained_trims_outside_current_scope: after.trims.rows.filter(r => !covered.has(sourceIdentity(r)!)).map(r => r.trim_config_id), mismatches };
   await save(join(run, 'coverage.json'), coverage);
   await save(join(run, 'verification.json'), result);
+  await writeAudit(run, p, after, receipt.ids);
   console.log('verification', { ok: result.ok, selected_series: result.selected_series, scoped_models: result.scoped_models, mapped_specs: result.mapped_specs,
     formula_checks: result.formula_checks, formula_missing: result.formula_missing_inputs_or_values, mismatches: result.mismatches.length });
+  console.log('图片覆盖', { models_with_attachments: imageCoverage.filter(x => x.attachments).length, models: imageCoverage.length,
+    attachments: imageCoverage.reduce((n, x) => n + x.attachments, 0), download_errors: result.image_errors.length });
   if (!result.ok) throw new Error('Read-back mismatch; do not blindly repeat writes');
+}
+
+export async function writeAudit(run: string, p: Plan, after: Record<Kind, Snapshot>, ids: { models: Record<string, string>; trims: Record<string, string> }) {
+  const entries: AuditEntry[] = [], summary: string[] = ['# 选定车系字段质量报告', '', '同步回读通过与字段完整程度分别报告；false默认值不是“不支持”的证据。', ''];
+  for (const group of p.groups) {
+    const packet = await load(join(run, `series-${group.series_id}.json`));
+    const parameter = (packet.sources as Source[]).filter(s => s.url.includes('getParamConf')).at(-1)!;
+    const raw = await load(join(run, parameter.file));
+    const candidates = interpret(raw.result, group.spec_ids, parameter.fetched_at);
+    const candidate = candidates.length === 1 ? candidates[0] : mergeParentGroups(candidates);
+    const model = after.models.rows.find(r => r.record_id === ids.models[group.model_key])!;
+    const attachment = (model.brochure_cover as { name: string; size: number }[] ?? []).map(p => ({ name: p.name, size: p.size }));
+    const imageReason = group.images.length ? '本次下载校验并上传匹配配置照片，附件回读已核对。' : attachment.length ? '已有附件保留，本轮没有替换或重传。' :
+      p.pending.some((x: any) => x.group === group.key && x.image_error) ? '下载/图片校验失败，详见plan image_error。' :
+        packet.image_errors?.length ? '图库请求或解析失败，详见series image_errors；不当作网站没有照片。' : '已查询匹配配置图库，仍未取得照片；不是全网无照片的证明。';
+    for (const f of [...after.models.schema].sort((a, b) => a.name.localeCompare(b.name))) {
+      const image = ['brochure_cover', 'image_url', 'gallery_images_json'].includes(f.name);
+      const galleryUrl = packet.sources.find((s: Source) => s.url.includes('/cars/imglist'))?.url ?? parameter.url;
+      const entry = auditField('models', group.model_key, f, f.name === 'brochure_cover' ? attachment : model[f.name],
+        candidate.model[f.name], candidate, image ? galleryUrl : parameter.url, undefined, imageReason);
+      if (image) {
+        entry.source_fields = ['图库series/spec/picture身份'];
+        entry.raw = packet.photos.filter((p: { spec_id: number }) => group.spec_ids.includes(p.spec_id)).map((p: { spec_id: number; category_id: number; source_url?: string }) => ({ ...p,
+          source_url: p.source_url ?? packet.sources.find((s: Source) => s.url.includes(`-${group.series_id}-${p.spec_id}-${p.category_id}-`))?.url ?? galleryUrl }));
+        entry.source_url = [...new Set((entry.raw as { source_url: string }[]).map(p => p.source_url))].join(' ; ') || galleryUrl;
+      }
+      entries.push(entry);
+    }
+    for (const t of candidate.trims) {
+      const key = `${group.series_id}/${t.spec_id}`, row = after.trims.rows.find(r => r.record_id === ids.trims[key])!;
+      for (const f of [...after.trims.schema].sort((a, b) => a.name.localeCompare(b.name))) entries.push(auditField('trims', key, f,
+        f.name === 'record_id' ? row._primary_text : row[f.name], t.fields[f.name], candidate, parameter.url, t.spec_id));
+    }
+    const needs = entries.filter(e => e.table === 'models' && e.key === group.model_key && (empty(e.actual) || e.field === 'household_charging' && e.actual === false));
+    summary.push(`## ${packet.name} / ${group.model_key}`, '', `本组${group.spec_ids.length}个在售配置；附件${attachment.length}张；待解释字段${needs.length}个。`, '', imageReason, '',
+      ...needs.map(e => `- ${e.field}（${e.label}）：${e.category}；${e.reason}`), '');
+  }
+  await save(join(run, 'field-audit.json'), entries); await Bun.write(join(run, 'field-audit.csv'), csvAudit(entries));
+  await Bun.write(join(run, '字段质量报告.md'), summary.join('\n'));
+  console.log('字段审计', { rows: entries.length, report: join(run, '字段质量报告.md'), csv: join(run, 'field-audit.csv') });
 }

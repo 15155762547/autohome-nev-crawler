@@ -62,5 +62,10 @@ describe('Autohome catalog contracts ported from the ES8 collector', () => {
     erev.datalist[0].paramconflist[0].itemname = '增程式';
     erev.datalist[0].paramconflist.push({ titleid: 99, itemname: '双电机四驱' });
     expect(interpret(erev, [1], 'now')[0].trims[0].fields.drivetrain_display).toEqual(['Dual-motor AWD']);
+    const phev = structuredClone(erev); phev.datalist[0].paramconflist[0].itemname = '插电式混合动力';
+    phev.datalist[0].paramconflist.at(-1)!.itemname = '前置四驱';
+    expect(interpret(phev, [1], 'now')[0].trims[0].fields.drivetrain_display).toEqual(['Front-engine AWD']);
+    const electric = structuredClone(phev); electric.datalist[0].paramconflist[0].itemname = '增程式';
+    expect(interpret(electric, [1], 'now')[0].trims[0].fields.drivetrain_display).toBeUndefined();
   });
 });

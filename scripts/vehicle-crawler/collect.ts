@@ -11,7 +11,7 @@ export const sha = (v: Uint8Array | string) => createHash('sha256').update(v).di
 export const save = async (file: string, value: unknown) => { await mkdir(join(file, '..'), { recursive: true }); await Bun.write(file, JSON.stringify(value, null, 2)); };
 export const load = (file: string) => Bun.file(file).json();
 export type Source = { url: string; final_url: string; fetched_at: string; sha256: string; file: string; mime: string };
-export type Photo = { spec_id: number; picture_id: number; src: string; category_id: number };
+export type Photo = { spec_id: number; picture_id: number; src: string; category_id: number; source_url?: string };
 export async function fetchPublic(url: string): Promise<{ raw: Uint8Array; final: string; mime: string }> {
   const host = new URL(url).hostname;
   if (!url.startsWith('https://') || !/(?:^|\.)(autohome\.com\.cn|autoimg\.cn)$/.test(host)) throw new Error('Unapproved source host');
@@ -59,12 +59,18 @@ export function photosFromHtml(html: string, sid: number, ids: number[]): Photo[
   if (!m) throw new Error('Gallery structure changed');
   const p = JSON.parse(m[1]).props.pageProps;
   if (p.breadInfo.seriesid !== sid) throw new Error('Wrong gallery identity');
-  const root = p.SeriesPicList ?? p.SpecPicList ?? {}, info = root.picinfo ?? {}, groups = Array.isArray(info) ? info : info.callist ?? [];
+  if (p.breadInfo.specid && !ids.includes(p.breadInfo.specid)) throw new Error('Wrong gallery spec identity');
+  const root = p.SpecPicList ?? p.SeriesPicList ?? {}, info = root.picinfo ?? {}, groups = Array.isArray(info) ? info : info.callist ?? [];
   const out: Photo[] = [];
   for (const g of groups) {
     if (![1, 10].includes(g.claid)) continue;
     for (const im of g.list ?? []) if (ids.includes(im.specid) && (im.mediatype ?? 0) === 0 && im.picpath) {
       out.push({ spec_id: im.specid, picture_id: im.picid, category_id: g.claid, src: im.picpath.replace(/^http:/, 'https:').replace(/^\/\//, 'https://') });
+    }
+  }
+  for (const spec of root.speclist ?? []) for (const im of spec.piclist ?? []) {
+    if (ids.includes(spec.specid) && im.specid === spec.specid && [1, 10].includes(im.claid) && (im.mediatype ?? 0) === 0 && im.picpath) {
+      out.push({ spec_id: im.specid, picture_id: im.picid, category_id: im.claid, src: im.picpath.replace(/^http:/, 'https:').replace(/^\/\//, 'https://') });
     }
   }
   return [...new Map(out.map(x => [x.src, x])).values()];
@@ -74,7 +80,11 @@ export async function collect(run: string, limit?: number): Promise<void> {
   if (!discovery.complete) throw new Error('Incomplete discovery');
   const selection = await load(join(run, 'selection.json'));
   if (!selection.complete || selection.discovery_sha !== sha(await Bun.file(join(run, 'discovery.json')).text())) throw new Error('Select a bounded cohort before collection');
-  const chosen = discovery.series.filter((s: { seriesid: number }) => selection.series_ids.includes(s.seriesid));
+  const chosen = selection.series_ids.map((id: number) => {
+    const row = discovery.series.find((s: { seriesid: number }) => s.seriesid === id);
+    if (!row || selection.excluded_series_ids.includes(id)) throw new Error('Selected series absent or excluded');
+    return row;
+  });
   const series = limit ? chosen.slice(0, limit) : chosen;
   let next = 0, done = 0;
   await Promise.all(Array.from({ length: 4 }, async () => {
@@ -100,9 +110,24 @@ export async function collect(run: string, limit?: number): Promise<void> {
           if (params.bread.seriesid !== sid) throw new Error('Wrong parameter series identity');
           const candidates = interpret(params, ids, b.info.fetched_at);
           const excluded = ids.filter(id => !candidates.some(g => g.trims.some(t => t.spec_id === id)));
-          const c = await source(run, `gallery-${sid}`, `https://www.autohome.com.cn/cars/imglist-x-x-${sid}-x-x-x-x-x-x-1.html`); sources.push(c.info);
-          const photos = photosFromHtml(new TextDecoder().decode(c.raw), sid, candidates.flatMap(g => g.trims.map(t => t.spec_id)));
-          await save(file, { complete: true, series_id: sid, name: s.seriesname, spec_ids: ids, excluded_non_nev_specs: excluded, candidates, photos, sources });
+          const photos: Photo[] = [], imageErrors: { url: string; error: string }[] = [];
+          const gallery = async (key: string, url: string, specs: number[]) => {
+            try {
+              const c = await source(run, key, url); sources.push(c.info);
+              photos.push(...photosFromHtml(new TextDecoder().decode(c.raw), sid, specs).map(p => ({ ...p, source_url: url })));
+              const unique = [...new Map(photos.map(p => [p.src, p])).values()]; photos.splice(0, photos.length, ...unique);
+            } catch (e) { imageErrors.push({ url, error: String(e) }); }
+          };
+          await gallery(`gallery-${sid}`, `https://www.autohome.com.cn/cars/imglist-x-x-${sid}-x-x-x-x-x-x-1.html`, ids);
+          for (const group of candidates) for (const cat of [1, 10]) {
+            const needed = cat === 1 ? 2 : 1;
+            const count = () => photos.filter(p => p.category_id === cat && group.trims.some(t => t.spec_id === p.spec_id)).length;
+            for (const trim of group.trims) {
+              if (count() >= needed) break;
+              await gallery(`gallery-${sid}-${trim.spec_id}-${cat}`, `https://www.autohome.com.cn/cars/imglist-x-x-${sid}-${trim.spec_id}-${cat}-x-x-x-x-1.html`, [trim.spec_id]);
+            }
+          }
+          await save(file, { complete: true, series_id: sid, name: s.seriesname, spec_ids: ids, excluded_non_nev_specs: excluded, candidates, photos, image_errors: imageErrors, sources });
         }
         await save(join(run, `error-${sid}.json`), null);
       } catch (e) { await save(join(run, `error-${sid}.json`), { series_id: sid, error: String(e), failed_at: new Date().toISOString() }); }
@@ -116,8 +141,12 @@ export async function collect(run: string, limit?: number): Promise<void> {
   await save(join(run, 'collection.json'), { complete: outcomes.every(x => x.ok), scope: series.map((s: { seriesid: number }) => s.seriesid),
     full_discovery: series.length === discovery.total, success: outcomes.filter(x => x.ok).length, failed: outcomes.filter(x => !x.ok), outcomes });
   console.log(`collection success ${outcomes.filter(x => x.ok).length}; failed ${outcomes.filter(x => !x.ok).length}`);
+  for (const outcome of outcomes.filter(x => x.ok)) {
+    const packet = await load(join(run, `series-${outcome.series_id}.json`));
+    console.log('参数/图库', { name: packet.name, specs: packet.spec_ids.length, image_candidates: packet.photos.length, gallery_errors: packet.image_errors?.length ?? 0 });
+  }
 }
-export async function select(run: string, count: number, exclusionFile: string, seriesId?: number): Promise<void> {
+export async function select(run: string, count: number, exclusionFile: string, seriesId?: number | number[]): Promise<void> {
   if (await Bun.file(join(run, 'collection.json')).exists()) throw new Error('Use a new run directory to select a different cohort');
   const d = await load(join(run, 'discovery.json')), exclusions = await load(exclusionFile);
   if (!d.complete || exclusions.complete !== true || !Array.isArray(exclusions.series_ids)) throw new Error('Discovery/exclusion contract incomplete');

@@ -1,25 +1,3 @@
 #!/bin/bash
 set -euo pipefail
-cd "$(dirname "$0")/.."
-export PATH="/Users/hjx/.bun/bin:$PATH"
-run=".vehicle-crawler-runs/mega-$(date +%Y%m%d-%H%M%S)-$$"
-cli() { bun scripts/vehicle-crawler/cli.ts "$@"; }
-echo "本次只采集理想 MEGA（车系 6939），只同步现有试验表。"
-echo "运行记录：$PWD/$run"
-echo "[1/7] 联网读取在售目录（只读目录，不采集其他车系参数）"
-cli discover "$run"
-echo "[2/7] 只读公司原表前115行，生成排除清单"
-cli exclusions "$run"
-echo "[3/7] 只选理想 MEGA"
-cli select "$run" --count 1 --series 6939 --exclude "$run/exclusions.json"
-echo "[4/7] 联网抓取 MEGA 的全部在售配置、参数和图库"
-cli collect "$run"
-bun -e 'const p=await Bun.file(process.argv[1]+"/series-6939.json").json(); if(!p.complete) throw Error("采集未完成"); console.log("抓到车系：",p.name,"；配置数：",p.spec_ids.length,"；图库候选：",p.photos.length); for(const g of p.candidates) for(const t of g.trims) console.log(t.fields.trim,{价格人民币:t.fields.trim_price_rmb,续航公里:t.fields.range_display,电池kWh:t.fields.battery_capacity_kwh,电机kW:t.fields.motor_power_kw,扭矩Nm:t.fields.motor_torque_n_m});' "$run"
-echo "[5/7] 映射字段、下载所需图片、对比试验表现有记录"
-cli plan "$run"
-echo "[6/7] 写入试验表（已有记录去重、非空值保留）"
-cli apply "$run"
-echo "[7/7] 回读参数、关联、公式和图片附件"
-cli verify "$run"
-echo "完成。详细核验结果：$PWD/$run/verification.json"
-echo "在试验表 models 中搜索 MEGA，trims 中搜索配置 78129；新建车型编号按来源生成。"
+exec bash "$(dirname "$0")/run-batch.sh" 6939
