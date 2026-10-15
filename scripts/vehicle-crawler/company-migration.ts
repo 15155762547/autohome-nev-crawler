@@ -2,7 +2,7 @@ import { mkdir } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { assertRetirement, alignmentFields, assertReference } from '../../lib/vehicle-company-reference';
 import { empty, same, sourceIdentity, type Cells } from '../../lib/vehicle-catalog-source';
-import { maintainedFields } from '../../lib/vehicle-catalog-audit';
+import { maintainedFields, calculatedFields } from '../../lib/vehicle-catalog-audit';
 import { LAB, call, snapshot, validateFields, type Plan, type Snapshot } from './feishu';
 import { load, save, sha } from './collect';
 
@@ -131,7 +131,7 @@ export async function applyMigration(run: string, p: Plan): Promise<void> {
       const now = current[kind].rows.find(r => r.record_id === record.prior_id)!;
       for (const f of Object.keys(record.fields)) {
         const name = current[kind].schema.find(x => x.id === f)?.name ?? f;
-        if (!alignmentFields[kind].has(name) && !maintainedFields.has(name) && !empty(old[name]) && !same(old[name], record.fields[f])) throw new Error(`Unapproved overwrite ${name}`);
+        if (!alignmentFields[kind].has(name) && !maintainedFields.has(name) && !calculatedFields.has(name) && !empty(old[name]) && !same(old[name], record.fields[f])) throw new Error(`Unapproved overwrite ${name}`);
       }
       const patch = remainingPatch(now, old, record.fields, current[kind].schema.find(f => f.name === 'record_id')?.id);
       if (Object.keys(patch).length) { validateFields(patch, current[kind].schema); changes[record.prior_id!] = patch; }

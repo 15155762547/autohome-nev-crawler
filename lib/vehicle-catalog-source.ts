@@ -1,5 +1,6 @@
 /** Rules reused from vehicle-crawler-es8/mapping.py and batch50.py, without cohort assertions. */
 import { z } from 'zod';
+import { calculateAirbags } from './vehicle-airbags';
 
 export type Cells = Record<string, unknown>;
 const parameterCell = z.object({ titleid: z.number(), itemname: z.string().nullable().optional(),
@@ -70,6 +71,8 @@ export function mergeParentGroups(groups: Candidate[]): Candidate {
     if (values.every(v => !empty(v) && same(v, values[0]))) model[key] = values[0];
     else if (/^(seats|top_speed)_(min|max)/.test(key) && values.every(v => typeof v === 'number')) model[key] = key.includes('_min') ? Math.min(...values as number[]) : Math.max(...values as number[]);
   }
+  const bagCounts = groups.map(g => g.model.airbags).filter((v): v is number => typeof v === 'number');
+  if (bagCounts.length) model.airbags = Math.max(...bagCounts);
   const common = groups.map(g => JSON.parse(String(g.model.common_features_json_pruned))[0].items as string[]);
   model.common_features_json_pruned = JSON.stringify([{ category: 'Autohome source values (Chinese)', items: common[0].filter(x => common.every(items => items.includes(x))) }]);
   const charge = [...new Set(groups.map(g => g.model.charging).filter(Boolean))];
@@ -101,6 +104,8 @@ export function interpret(input: unknown, allowed: number[], fetched: string): C
     const values = (name: string) => specs.map(s => selected(s, index, name));
     const commonNumber = (name: string) => { const ns = values(name).map(numeric); return ns.every(x => x !== null) && new Set(ns).size === 1 ? ns[0] : null; };
     const model: Cells = { MODEL: r.bread.seriesname, brand: r.bread.brandname, model: r.bread.seriesname, model_year: year, powertrain_type: [energy] };
+    const airbagCounts = specs.map(s => calculateAirbags(s, index).count).filter((v): v is number => v !== null);
+    if (airbagCounts.length) model.airbags = Math.max(...airbagCounts);
     for (const [f, n] of Object.entries(modelNumbers)) { const v = commonNumber(n); if (v !== null) model[f] = v; }
     for (const [stem, n] of [['seats', '座位数(个)'], ['top_speed', '最高车速(km/h)']]) {
       const ns = values(n).map(numeric);

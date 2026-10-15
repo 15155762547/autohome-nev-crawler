@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { calculateAirbags } from './vehicle-airbags';
 import { empty, mergeParentGroups, same, sourceIdentity, type Candidate, type Cells } from './vehicle-catalog-source';
 
 export const COMPANY = { base_token: 'Is6Xb3btbazhFhsDXgFcqFG1nRc', models: 'tblxVNjP9dnJ7b3o', trims: 'tbl8YzkZkMxvHRoT' } as const;
@@ -50,6 +51,13 @@ export function companyCandidates(groups: Candidate[], ref: CompanyReference): C
       const name = sourceYear ? r.trim.replace(/^\d{4}(?= MY\b)/, sourceYear) : r.trim;
       return { ...t, fields: { ...t.fields, trim: name, trim_config_id: r.trim_config_id, trim_order: i + 1, ...(typeof t.fields.trim_price_rmb === 'number' ? { trim_price_display: Math.round(t.fields.trim_price_rmb / 6.74) } : {}) } };
     });
+    // A source-year group can be split across company products: aggregate only this parent's specs.
+    const ownIds = new Set(g.trims.map(t => t.spec_id));
+    const evidence = (g.evidence.groups ?? [g.evidence]) as Record<string, any>[];
+    const counts = evidence.flatMap(e => (e.specs ?? []).filter((s: any) => ownIds.has(s.spec_id))
+      .map((s: any) => calculateAirbags({ paramconflist: s.raw }, e.title_index ?? {}).count)).filter((n): n is number => n !== null);
+    delete g.model.airbags;
+    if (counts.length) g.model.airbags = Math.max(...counts);
     return g;
   });
 }

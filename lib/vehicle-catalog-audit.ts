@@ -1,4 +1,5 @@
 import { empty, meaningful, modelNumbers, trimNumbers, protectedFields, same, selected, reconcile, type Candidate, type Cells } from './vehicle-catalog-source';
+import { calculateAirbags } from './vehicle-airbags';
 import { fieldLabels } from './vehicle-field-labels';
 
 export type AuditField = { name: string; type: string; options?: { name: string }[] };
@@ -6,6 +7,7 @@ export type AuditEntry = { table: 'models' | 'trims'; key: string; field: string
   category: string; reason: string; source_url: string; source_fields: string[]; raw: unknown };
 export const maintainedFields = new Set(['last_verified_at', 'source_status', 'trim_last_verified_at', 'trim_section_status_pruned',
   'trim_source_summary_pruned', 'review_notes']);
+export const calculatedFields = new Set(['airbags']);
 export const auditMarker = '\n【爬虫字段审计】\n';
 const auditEnd = '\n【爬虫字段审计结束】';
 export function auditNotes(existing: unknown, summary: string): string {
@@ -16,6 +18,10 @@ export function reconcileMaintained(old: Cells | undefined, desired: Cells) {
   const result = reconcile(old, desired);
   result.conflicts = result.conflicts.filter(c => !maintainedFields.has(c.field));
   for (const field of maintainedFields) if (!empty(desired[field]) && !same(old?.[field], desired[field])) result.patch[field] = desired[field];
+  for (const field of calculatedFields) if (typeof desired[field] === 'number') {
+    result.conflicts = result.conflicts.filter(c => c.field !== field);
+    if (!same(old?.[field], desired[field])) result.patch[field] = desired[field];
+  }
   return result;
 }
 const fields: Record<string, string[]> = {
@@ -45,8 +51,8 @@ export function auditField(table: 'models' | 'trims', key: string, field: AuditF
   const input = field.type === 'formula' ? formulaInputs[field.name] ?? formulaInputs[field.name.replace(/_(min|max)_.+_auto$/, '')] : undefined;
   const evidence = (group.evidence.groups ?? [group.evidence]) as Record<string, unknown>[];
   const index = evidence[0]?.title_index as Record<string, number> | undefined;
-  const names = ['common_features_json_pruned', 'base_spec_summary_json'].includes(field.name) ? Object.keys(index ?? {}) : fields[input ?? field.name] ?? [];
-  const specs = evidence.flatMap(e => e.specs as { spec_id: number; raw: any[] }[] ?? []).filter(s => specId === undefined || s.spec_id === specId);
+  const names = field.name === 'airbags' ? Object.keys(index ?? {}).filter(n => /气囊|气帘/.test(n)) : ['common_features_json_pruned', 'base_spec_summary_json'].includes(field.name) ? Object.keys(index ?? {}) : fields[input ?? field.name] ?? [];
+  const specs = evidence.flatMap(e => e.specs as { spec_id: number; raw: any[] }[] ?? []).filter(s => group.trims.some(t => t.spec_id === s.spec_id) && (specId === undefined || s.spec_id === specId));
   const raw: unknown = names.length ? specs.map(s => ({ spec_id: s.spec_id, values: Object.fromEntries(names.map(n => [n,
     n === '车型名称' ? index ? selected({ paramconflist: s.raw }, index, n) : group.trims.find(t => t.spec_id === s.spec_id)?.fields.trim : n === '车系名称' ? group.model.MODEL : n === '品牌' ? group.model.brand :
       { value: index ? selected({ paramconflist: s.raw }, index, n) : '', cell: s.raw.find(c => c.titleid === index?.[n]) ?? null }])) })) : null;
@@ -73,8 +79,14 @@ export function auditField(table: 'models' | 'trims', key: string, field: AuditF
     const known = specs.filter(s => index && selected({ paramconflist: s.raw }, index, '电池特有技术') === '刀片电池').length;
     category = mapped ? '程序转换' : known ? '条件不明确' : '来源未披露';
     reason = mapped ? '来源明确刀片电池，映射为已有枚举Blade。' : `本组${specs.length}款中${known}款明确刀片电池；并非全部配置都已披露同一技术，共享字段留空。化学类型LFP不能代替结构技术证据。`;
-  } else if (field.name === 'airbags' && !mapped) {
-    category = '条件不明确'; reason = '分区标配/选装标记不等于明确总数量；不猜测相加。';
+  } else if (field.name === 'airbags') {
+    const calculations = specs.map(s => ({ spec_id: s.spec_id, ...calculateAirbags({ paramconflist: s.raw }, index ?? {}) }));
+    const known = calculations.filter(c => c.count !== null), unknown = calculations.filter(c => c.count === null);
+    category = mapped ? '程序转换' : '条件不明确';
+    reason = `按用户确定的规则，取所选配置已披露标配气囊计算数的最大值；不代表全系每款都有这个数量，也不代表厂家直接公布总数。` +
+      `共${known.length}款可计算，${unknown.length}款未知${unknown.length ? `（${unknown.map(c => c.spec_id).join(',')}）` : ''}。` +
+      (known.length ? `逐款：${known.map(c => `${c.spec_id}=${c.count}`).join('；')}。` : '本组没有可计算配置，留空，不填0。') +
+      '主副驾各1；每排左右侧气囊2；左右贯穿气帘共2；前排中间1；选装不计入标配。未知配置不参与最大值，不借用其他车型或出口版。';
   } else if (mapped) {
     category = transformed.has(field.name) ? '程序转换' : '公开事实';
     reason = field.name === 'trim_price_display' ? '人民币指导价÷6.74，保留两位小数；不是公开美元报价。' :
@@ -94,7 +106,7 @@ export function auditField(table: 'models' | 'trims', key: string, field: AuditF
   } else {
     category = '代码未覆盖'; reason = '当前字段没有已实现且已核实的自动映射；不是来源缺失的证明。';
   }
-  if (present && mapped && !same(actual, candidate) && !maintainedFields.has(field.name)) reason += ' 当前非空值与候选不同，保留现值并列出差异，可能是翻译/取整或事实差异。';
+  if (present && mapped && !same(actual, candidate) && !maintainedFields.has(field.name) && !calculatedFields.has(field.name)) reason += ' 当前非空值与候选不同，保留现值并列出差异，可能是翻译/取整或事实差异。';
   if (present && !mapped && !programFields.has(field.name) && field.type !== 'formula' && !protectedFields.has(field.name)) reason += ' 当前值为历史保留，不宣称本次重新核实。';
   return { table, key, field: field.name, label: fieldLabels[field.name] ?? field.name, actual: actual ?? null, candidate: candidate ?? null, category, reason,
     source_url: category === '公司业务' || category === '代码未覆盖' || field.name === 'i18n_translations' ? '' : sourceUrl, source_fields: names, raw };

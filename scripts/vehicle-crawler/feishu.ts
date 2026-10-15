@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { empty, interpret, matchesFormulaNumber, mergeParentGroups, protectedFields, same, sourceIdentity, type Candidate, type Cells } from '../../lib/vehicle-catalog-source';
 import { load, save, sha, downloadPhotos, type Source } from './collect';
-import { auditField, auditNotes, csvAudit, maintainedFields, reconcileMaintained, type AuditEntry } from '../../lib/vehicle-catalog-audit';
+import { auditField, auditNotes, csvAudit, maintainedFields, calculatedFields, reconcileMaintained, type AuditEntry } from '../../lib/vehicle-catalog-audit';
 import { referenceSchema, assertReference, companyCandidates, alignmentPatch, alignmentFields, seagullScopePatch, seagullScopeFields, type CompanyReference, type Retirement } from '../../lib/vehicle-company-reference';
 
 export const LAB = { base_token: 'EB60b9omTaMyZzsJ273cKdL8nkb', profile: 'shengxu',
@@ -179,9 +179,10 @@ export async function plan(run: string, images = true, allowPartial = false, com
       const missing = before.models.schema.filter(f => !['formula', 'link'].includes(f.type)).map(f => auditField('models', modelKey, f,
         f.name in desired ? desired[f.name] : prior?.[f.name], desired[f.name], g, parameter.url)).filter(e =>
         !(p.alignment && e.field === 'model_year') && ['来源未披露', '条件不明确', '枚举不适配', '代码未覆盖'].includes(e.category));
+      const airbagNote = auditField('models', modelKey, { name: 'airbags', type: 'number' }, desired.airbags, desired.airbags, g, parameter.url).reason;
       const scopeNote = p.refresh_seagull_scope ? `销售范围：${packet.on_sale_spec_ids.length}款在售 + ${packet.upcoming_spec_ids.length}款预售/即将上市（${packet.upcoming_spec_ids.join(',')}）。预售价格和未披露参数留空。\n新旧尺寸不同，models共享尺寸留空，各款尺寸/座位数保存在base_spec_summary_json。\n后备厢930L、对外放电及3.3kW仅适用于原8款已披露配置，不能推及预售款；8款刀片电池明确，预售未披露，共享技术字段留空。\n78508公司英文名历史年款已按来源改为2027，名称其余部分沿用公司；model_year为公司展示年款，不代表全部配置。\n` : '';
       desired.review_notes = auditNotes(prior?.review_notes, `来源：${parameter.url}\n来源采集时间：${parameter.fetched_at}\n本组配置：${currentIds.join(',')}\n` +
-        scopeNote + missing.sort((a, b) => a.field.localeCompare(b.field)).map(e => `${e.field}：${e.reason}`).join('\n'));
+        scopeNote + `安全气囊：${airbagNote}\n` + missing.sort((a, b) => a.field.localeCompare(b.field)).map(e => `${e.field}：${e.reason}`).join('\n'));
       add('models', modelKey, desired, prior);
       for (const t of g.trims) {
         const key = `${sid}/${t.spec_id}`, old = trims.get(key);
@@ -332,7 +333,7 @@ export async function verify(run: string): Promise<void> {
         mismatches.push({ missing_existing_record: old.record_id }); continue; }
       for (const f of p.before[kind].schema) {
         if (['formula', 'link', 'updated_at', 'updated_by'].includes(f.type) || empty(old[f.name]) || old[f.name] === false) continue;
-        if (maintainedFields.has(f.name) && [...p.creates[kind], ...p.updates[kind]].some(r => r.prior_id === old.record_id && f.name in r.fields)) continue;
+        if ((maintainedFields.has(f.name) || calculatedFields.has(f.name)) && [...p.creates[kind], ...p.updates[kind]].some(r => r.prior_id === old.record_id && f.name in r.fields)) continue;
         if (p.alignment?.align_existing && alignmentFields[kind].has(f.name) && p.updates[kind].some(r => r.prior_id === old.record_id && (f.name in r.fields || f.id in r.fields))) continue;
         if (p.refresh_seagull_scope && kind === 'models' && old.model_id === 'MDL-002' && seagullScopeFields.has(f.name) && p.updates.models.some(r => r.prior_id === old.record_id && f.name in r.fields)) continue;
         if (kind === 'models' && f.name === 'last_synced_at' && receipt.synced_model_ids?.includes(old.record_id)) continue;
