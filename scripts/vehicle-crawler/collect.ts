@@ -40,19 +40,24 @@ export async function discover(run: string): Promise<void> {
   const props = JSON.parse(m[1]).props.pageProps;
   if (props.type !== 'ev' || props.searchtype !== 6 || props.filter) throw new Error('Wrong page scope');
   const advertised = listingSchema.parse(props.seriesList), pages: (Source & { page: number; count: number })[] = [], rows: typeof advertised.seriesgrouplist = [];
-  for (let p = 1; p <= Math.ceil(advertised.seriescount / 20); p++) {
+  let total = 0;
+  for (let p = 1; p === 1 || p <= Math.ceil(total / 20); p++) {
     const x = await source(run, `discovery-${p}`, `${BASE}search/searchcar?searchtype=6&pageindex=${p}&pagesize=20&orderid=0&state=2`);
     const data = listingSchema.parse(response(x.raw));
-    if (data.seriescount !== advertised.seriescount) throw new Error('Discovery count changed during pagination');
+    if (p === 1) total = data.seriescount;
+    if (data.seriescount !== total) throw new Error('Discovery count changed during API pagination');
     pages.push({ ...x.info, page: p, count: data.seriesgrouplist.length }); rows.push(...data.seriesgrouplist);
-    if (p % 10 === 0 || p === Math.ceil(advertised.seriescount / 20)) console.log(`目录分页 ${p}/${Math.ceil(advertised.seriescount / 20)}`);
+    if (p % 10 === 0 || p === Math.ceil(total / 20)) console.log(`目录分页 ${p}/${Math.ceil(total / 20)}`);
   }
-  assertDiscovery(rows, advertised.seriescount);
-  if (advertised.seriesgrouplist.some(s => !rows.some(x => x.seriesid === s.seriesid))) throw new Error('Page/API disagreement');
+  assertDiscovery(rows, total);
+  const pageOnlyIds = advertised.seriesgrouplist.filter(s => !rows.some(x => x.seriesid === s.seriesid)).map(s => s.seriesid);
+  if (advertised.seriescount === total && pageOnlyIds.length) throw new Error('Page/API identity disagreement without a total-count change');
   await save(join(run, 'discovery.json'), { complete: true, filters: { page: '/price/ev', searchtype: 6, state: 2, orderid: 0, pagesize: 20 },
-    fetched_at: page.info.fetched_at, screenshot_baseline: 863, total: rows.length, pages, series: rows });
-  console.log(`discovered ${rows.length} series, ${pages.length} pages`);
+    fetched_at: page.info.fetched_at, screenshot_baseline: 863, total: rows.length, pages, series: rows,
+    page_api_comparison: { page_total: advertised.seriescount, api_total: total, page_only_ids: pageOnlyIds, totals_match: advertised.seriescount === total } });
+  console.log(`discovered ${rows.length} series, ${pages.length} pages; page advertised ${advertised.seriescount}`);
 }
+
 export function photosFromHtml(html: string, sid: number, ids: number[]): Photo[] {
   const m = /<script id="__NEXT_DATA__"[^>]*>(.*?)<\/script>/.exec(html);
   if (!m) throw new Error('Gallery structure changed');
