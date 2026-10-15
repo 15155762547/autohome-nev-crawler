@@ -66,7 +66,7 @@ bun scripts/vehicle-crawler/cli.ts verify .vehicle-crawler-runs/run-20261013
 
 - 发现接口来自 `/price/ev` 页面发布代码：`searchtype=6,state=2,orderid=0,pagesize=20`；逐页直到网站总数，核对唯一 series ID。列表状态码20和30都可能在该筛选中出现，不自行推断状态码意义。
 - 在售配置来自 `getSpecList` 的同一筛选，逐车系核对列表 specids。参数页额外配置不入库；参数接口未返回列表配置时记录失败。混合车系中的非 BEV/PHEV/EREV 配置单列排除。
-- 新模型按 series/year/energy 分组。原 AUT/MDL 配置按 series/spec 匹配，保留已有父模型；父模型跨年款时只采用各组共同标量，不把不同值合成一个数。车型行数不等于车系数。
+- 有公司目录参照时，按 series/spec 对齐公司产品身份及分组，可跨年；具体年款保留在配置中。无参照的旧流程按 series/year/energy 分组，不能宣称对齐公司产品目录。父模型跨年款时只采用共同标量，不把不同值合成一个数。车型行数不等于车系数。
 - 每个目标字段有映射/公式/业务保护/缺来源或条件不同的处置说明。所有参数标题与原始选项保留，空值不推算；配置指导价与人工展示报价分开。
 - 图库必须返回同一 series，并匹配已采集 spec。照片在原年款/配置范围内挑选最多两张外观和一张内饰，验证 MIME、解码、尺寸和 SHA256，再通过附件专用操作上传；已有附件保留。当前图库响应未返回准确配置照片则报告缺口，不据此声称整个网站没有照片。
 - 回读检查写入字段、自定义文本主字段、原非空值、双向关联、附件和可计算的数值公式。缺输入/缺返回的公式单列，不算已计算。重复 `plan → apply → verify` 应为0新增、0更新、0上传。
@@ -81,3 +81,23 @@ bun run check
 ```
 
 网页接口无稳定性保证。失败、候选冲突、排除配置及缺照片是可审计结果，不能包装成所有字段已齐或可直接发布网站。
+
+## 公司目录对齐（钛7）
+
+公司目录参照只读取产品名称、业务编号、展示年款及配置关联，不复制推荐、报价、网站路由等业务内容。按汽车之家 `series/spec` 匹配英文名称和产品分组；钛7插混跨年合并，纯电单独成组。公司缺少对应配置或存在身份歧义时停止，不猜译名或自动换产品。
+
+已有采集目录可重放参数，禁止把重放时间称为重新采集时间：
+
+```sh
+bun scripts/vehicle-crawler/cli.ts reference RUN
+bun scripts/vehicle-crawler/cli.ts plan RUN --company-reference RUN/company-reference.json --align-existing --skip-images
+# 检查 plan.json 后，仅写试验表
+bun scripts/vehicle-crawler/cli.ts apply RUN
+bun scripts/vehicle-crawler/cli.ts verify RUN
+```
+
+`--align-existing` 当前只允许选定钛7（8171），使用独立备份及精确字段清单修正历史值；普通同步继续保护已有非空参数。合并迁移先备份记录、schema、关联及全部附件，重挂配置并回读双向关联，最后仅移除计划中的冗余2026款插混父行。普通写入入口仍不允许删除。中断后直接重试同一 `apply`，会核对原计划、备份哈希与已完成字段，只补剩余步骤；检测到其他编辑则停止。完成后重新 `plan → apply → verify` 验收幂等性。
+
+对于新建或后续正常同步，`reference RUN` 后 `plan RUN --skip-images` 自动读取目录中的参照文件，不需要再次使用迁移开关。通用批次脚本会读取公司参照；若明确要采集公司已有车型，可以使用 `bash scripts/run-batch.sh 8171 --no-company-exclusions`（该命令会联网采集，缓存验收不要执行）。未识别到的公司产品配置会报告缺少映射，不自动用中文名新建重复产品。
+
+参照模式的美元指导价按人民币÷6.74四舍五入到整数，配置按人民币价格升序、同价按spec ID排序。插混四驱必须同时取得双电机和前后布局证据才映射为 `Dual-motor AWD`。公司展示年款不代表全部关联配置的年款，具体年款仍保留在配置名称及原始快照中。未经证实的800V、气囊、质保等不会从公司旧表直接补入。

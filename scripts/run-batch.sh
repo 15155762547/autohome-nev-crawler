@@ -11,12 +11,17 @@ echo "运行记录：$PWD/$run"
 echo '[1/7] 联网发现在售目录（只读目录）'
 cli discover "$run"
 echo '[2/7] 只读公司前115行，生成排除证据'
-cli exclusions "$run"
+if [[ "${2:-}" == '--no-company-exclusions' ]]; then
+  echo '按显式参数跳过公司前115行排除'
+  bun -e 'await Bun.write(process.argv[1],JSON.stringify({complete:true,series_ids:[],reason:"Explicit --no-company-exclusions"}))' "$run/exclusions.json"
+elif [[ -z "${2:-}" ]]; then cli exclusions "$run"
+else echo '第二参数只接受 --no-company-exclusions'; exit 1; fi
 echo '[3/7] 检查并选择明确车系，禁止自动替换'
 cli select "$run" --series-ids "$series_ids" --exclude "$run/exclusions.json"
 echo '[4/7] 抓取参数与匹配配置的外观、内饰图库'
 cli collect "$run"
 echo '[5/7] 映射字段、对比现值、规划必要图片及来源信息'
+cli reference "$run"
 cli plan "$run"
 echo '[6/7] 同步选定试验记录，非空业务/参数值保留'
 cli apply "$run"

@@ -4,17 +4,19 @@ import { z } from 'zod';
 import { empty, interpret, matchesFormulaNumber, mergeParentGroups, protectedFields, same, sourceIdentity, type Candidate, type Cells } from '../../lib/vehicle-catalog-source';
 import { load, save, sha, downloadPhotos, type Source } from './collect';
 import { auditField, auditNotes, csvAudit, maintainedFields, reconcileMaintained, type AuditEntry } from '../../lib/vehicle-catalog-audit';
+import { referenceSchema, assertReference, companyCandidates, alignmentPatch, alignmentFields, type CompanyReference, type Retirement } from '../../lib/vehicle-company-reference';
 
 export const LAB = { base_token: 'EB60b9omTaMyZzsJ273cKdL8nkb', profile: 'shengxu',
   tables: { models: 'tblzyug797w8obPF', trims: 'tbljGsW6q0bvSxri' } } as const;
 type Kind = keyof typeof LAB.tables;
 const fieldSchema = z.object({ id: z.string(), name: z.string(), type: z.string(), options: z.array(z.object({ name: z.string() })).optional() }).passthrough();
 type Field = z.infer<typeof fieldSchema>;
-type Snapshot = { schema: Field[]; rows: Cells[]; rev: number };
+export type Snapshot = { schema: Field[]; rows: Cells[]; rev: number };
 type Planned = { key: string; prior_id?: string; fields: Cells; model_key?: string };
-type Plan = { target: typeof LAB; source_sha: string; selection_sha: string; before: Record<Kind, Snapshot>; creates: Record<Kind, Planned[]>;
+export type Plan = { target: typeof LAB; source_sha: string; selection_sha: string; before: Record<Kind, Snapshot>; creates: Record<Kind, Planned[]>;
   updates: Record<Kind, Planned[]>; model_ids: Record<string, string>; conflicts: unknown[]; pending: unknown[];
-  groups: { key: string; model_key: string; series_id: number; spec_ids: number[]; images: Awaited<ReturnType<typeof downloadPhotos>> }[] };
+    groups: { key: string; model_key: string; series_id: number; spec_ids: number[]; images: Awaited<ReturnType<typeof downloadPhotos>> }[];
+  alignment?: { reference: CompanyReference; reference_sha: string; align_existing: boolean; retired: Retirement[] } };
 
 export function guardWrite(args: string[]): void {
   if (args[args.indexOf('--base-token') + 1] !== LAB.base_token || !args.includes('--base-token') ||
@@ -72,6 +74,7 @@ export function validateFields(fields: Cells, schema: Field[]): void {
   for (const [key, value] of Object.entries(fields)) {
     const f = schema.find(f => f.name === key || f.id === key);
     if (!f || ['formula', 'lookup', 'attachment', 'created_at', 'updated_at'].includes(f.type) || protectedFields.has(f.name)) throw new Error(`Forbidden field ${key}`);
+    if (value === null) continue;
     if (f.type === 'number' && (typeof value !== 'number' || !Number.isFinite(value))) throw new Error(`Invalid numeric ${key}`);
     if (f.type === 'select' && (!Array.isArray(value) || value.some(v => !f.options?.some(o => o.name === v)))) throw new Error(`Unmapped option ${key}`);
     if (f.type === 'checkbox' && typeof value !== 'boolean') throw new Error(`Invalid checkbox ${key}`);
@@ -83,7 +86,7 @@ function unique(rows: Cells[], key: (r: Cells) => string | null): Map<string, Ce
   for (const row of rows) { const k = key(row); if (!k) throw new Error('Unresolved existing source identity'); if (m.has(k)) throw new Error(`Duplicate existing key ${k}`); m.set(k, row); }
   return m;
 }
-export async function plan(run: string, images = true, allowPartial = false): Promise<void> {
+export async function plan(run: string, images = true, allowPartial = false, companyFile?: string, alignExisting = false): Promise<void> {
   const collection = await load(join(run, 'collection.json'));
   const selection = await load(join(run, 'selection.json'));
   if (!same(collection.scope, selection.series_ids) || !selection.complete || collection.scope.some((sid: number) => selection.excluded_series_ids.includes(sid))) throw new Error('Collection differs from the approved bounded selection');
@@ -96,9 +99,18 @@ export async function plan(run: string, images = true, allowPartial = false): Pr
   const models = unique(before.models.rows, r => typeof r.model_id === 'string' && r.model_id ? r.model_id : null), trims = unique(before.trims.rows, sourceIdentity);
   const p: Plan = { target: LAB, source_sha: sha(await Bun.file(join(run, 'collection.json')).text()), selection_sha: sha(await Bun.file(join(run, 'selection.json')).text()), before,
     creates: { models: [], trims: [] }, updates: { models: [], trims: [] }, model_ids: {}, conflicts: [], pending: [], groups: [] };
+  if (alignExisting && !companyFile) throw new Error('Alignment requires explicit company reference');
+  if (companyFile) {
+    const ref = referenceSchema.parse(await load(companyFile)); assertReference(ref);
+    if (!same([...ref.series_ids].sort(), [...selection.series_ids].sort())) throw new Error('Company reference selection mismatch');
+    if (alignExisting && !same(selection.series_ids, [8171])) throw new Error('Existing-record migration is authorized only for Ti7');
+    p.alignment = { reference: ref, reference_sha: sha(JSON.stringify(ref)), align_existing: alignExisting, retired: [] };
+  }
   const add = (kind: Kind, key: string, desired: Cells, prior?: Cells, modelKey?: string) => {
     const { patch, conflicts } = reconcileMaintained(prior, desired);
-    p.conflicts.push(...conflicts.map(c => ({ table: kind, key, ...c })));
+    const overrides = p.alignment?.align_existing ? alignmentPatch(kind, prior, desired) : {};
+    Object.assign(patch, overrides);
+    p.conflicts.push(...conflicts.filter(c => !(c.field in overrides)).map(c => ({ table: kind, key, ...c })));
     validateFields(patch, before[kind].schema);
     const record = { key, prior_id: prior?.record_id as string | undefined, fields: patch, model_key: modelKey };
     if (!prior) p.creates[kind].push(record); else if (Object.keys(patch).length) p.updates[kind].push(record);
@@ -114,9 +126,11 @@ export async function plan(run: string, images = true, allowPartial = false): Pr
     const parameter = (packet.sources as Source[]).filter(s => s.url.includes('getParamConf')).at(-1)!;
     const raw = await load(join(run, parameter.file));
     if (raw.returncode !== 0 || raw.result?.bread?.seriesid !== sid) throw new Error('Source parameter identity mismatch');
-    const candidates = interpret(raw.result, packet.spec_ids, parameter.fetched_at);
+    let candidates = interpret(raw.result, packet.spec_ids, parameter.fetched_at);
+    if (p.alignment) candidates = companyCandidates(candidates, p.alignment.reference);
     const assigned = new Map<string, Candidate[]>();
     for (const sourceGroup of candidates) {
+      if (p.alignment) { assigned.set(sourceGroup.key, [sourceGroup]); continue; }
       const parents = [...new Set(sourceGroup.trims.map(t => trims.get(`${sid}/${t.spec_id}`)?.model_id).filter(Boolean))] as string[];
       for (const parent of new Set([...parents, ...(sourceGroup.trims.some(t => !trims.has(`${sid}/${t.spec_id}`)) ? [parents.length === 1 ? parents[0] : sourceGroup.key] : [])])) {
         const subset = sourceGroup.trims.filter(t => (trims.get(`${sid}/${t.spec_id}`)?.model_id ?? (parents.length === 1 ? parents[0] : sourceGroup.key)) === parent);
@@ -124,8 +138,21 @@ export async function plan(run: string, images = true, allowPartial = false): Pr
       }
     }
     for (const [modelKey, related] of assigned) {
-      const g = related.length === 1 ? related[0] : mergeParentGroups(related), prior = models.get(modelKey);
-      if (modelKey.startsWith('MDL-') && !prior) throw new Error('Orphan existing trim');
+      const g = related.length === 1 ? related[0] : mergeParentGroups(related);
+      let prior = models.get(modelKey);
+      if (p.alignment) {
+        const parents = [...new Set(g.trims.map(t => trims.get(`${sid}/${t.spec_id}`)?.model_id).filter(Boolean))] as string[];
+        if (!prior && parents.length && !p.alignment.align_existing) throw new Error('Existing product needs explicit --align-existing migration');
+        if (!prior && parents.length) prior = parents.map(key => models.get(key)!).sort((a, b) => Number(a.model_year) - Number(b.model_year) || String(a.model_id).localeCompare(String(b.model_id)))[0];
+        for (const parent of parents.filter(k => k !== prior?.model_id)) {
+          const old = models.get(parent)!;
+          const outside = before.trims.rows.filter(t => t.model_id === parent && !g.trims.some(s => sourceIdentity(t) === `${sid}/${s.spec_id}`));
+          if (outside.length || [...protectedFields].some(f => !empty(old[f]) && old[f] !== false)) throw new Error('Cannot retire product with outside trims or business content');
+          p.alignment.retired.push({ record_id: String(old.record_id), model_id: parent, into_key: modelKey });
+        }
+        if (prior && !p.alignment.align_existing && prior.model_id !== modelKey) throw new Error('Company identity mismatch');
+      }
+      if (!p.alignment && modelKey.startsWith('MDL-') && !prior) throw new Error('Orphan existing trim');
       const desired: Cells = { ...g.model, model_id: modelKey };
       let photoList: Awaited<ReturnType<typeof downloadPhotos>> = [];
       if (images && empty(prior?.brochure_cover)) {
@@ -140,18 +167,20 @@ export async function plan(run: string, images = true, allowPartial = false): Pr
       const oldChildren = g.trims.map(t => trims.get(`${sid}/${t.spec_id}`)?.record_id);
       Object.assign(desired, { trim_last_verified_at: parameter.fetched_at,
         trim_section_status_pruned: [linkedIds.some(id => !oldChildren.includes(id)) ? 'Partial' : 'Verified'],
-        trim_source_summary_pruned: `Autohome series ${sid}; current group specs ${currentIds.join(',')}; source fetched ${parameter.fetched_at}; Chinese source names retained.` });
+        trim_source_summary_pruned: `Autohome series ${sid}; current group specs ${currentIds.join(',')}; source fetched ${parameter.fetched_at}; ${p.alignment ? 'English product/configuration names and representative model year from company catalogue; source years remain per configuration.' : 'Chinese source names retained.'}` });
       const missing = before.models.schema.filter(f => !['formula', 'link'].includes(f.type)).map(f => auditField('models', modelKey, f,
-        desired[f.name] ?? prior?.[f.name], desired[f.name], g, parameter.url)).filter(e => ['来源未披露', '条件不明确', '枚举不适配', '代码未覆盖'].includes(e.category));
+        f.name in desired ? desired[f.name] : prior?.[f.name], desired[f.name], g, parameter.url)).filter(e =>
+        !(p.alignment && e.field === 'model_year') && ['来源未披露', '条件不明确', '枚举不适配', '代码未覆盖'].includes(e.category));
       desired.review_notes = auditNotes(prior?.review_notes, `来源：${parameter.url}\n来源采集时间：${parameter.fetched_at}\n本组配置：${currentIds.join(',')}\n` +
         missing.sort((a, b) => a.field.localeCompare(b.field)).map(e => `${e.field}：${e.reason}`).join('\n'));
       add('models', modelKey, desired, prior);
       for (const t of g.trims) {
         const key = `${sid}/${t.spec_id}`, old = trims.get(key);
-        if (old && !empty(old.vehicle_model_pruned) && !same(old.vehicle_model_pruned, [{ id: prior?.record_id }])) throw new Error(`Existing parent link disagrees with model_id: ${key}`);
-        const record: Cells = { ...t.fields, model_id: modelKey, trim_config_id: old?.trim_config_id ?? t.fields.trim_config_id };
+        if (old && !p.alignment?.align_existing && !empty(old.vehicle_model_pruned) && !same(old.vehicle_model_pruned, [{ id: prior?.record_id }])) throw new Error(`Existing parent link disagrees with model_id: ${key}`);
+        const record: Cells = { ...t.fields, model_id: modelKey, trim_config_id: p.alignment ? t.fields.trim_config_id : old?.trim_config_id ?? t.fields.trim_config_id };
         const fid = before.trims.schema.find(f => f.name === 'record_id')!.id;
-        if (!old || empty(old._primary_text)) record[fid] = record.trim_config_id;
+        if (!old || empty(old._primary_text) || p.alignment?.align_existing && old._primary_text !== record.trim_config_id) record[fid] = record.trim_config_id;
+        if (p.alignment?.align_existing && old && !same(old.vehicle_model_pruned, [{ id: prior?.record_id }])) record.vehicle_model_pruned = [{ id: prior!.record_id }];
         add('trims', key, record, old, modelKey);
       }
       p.groups.push({ key: g.key, model_key: modelKey, series_id: sid, spec_ids: g.trims.map(t => t.spec_id), images: photoList });
@@ -172,10 +201,21 @@ export async function plan(run: string, images = true, allowPartial = false): Pr
   p.groups.sort((a, b) => a.model_key.localeCompare(b.model_key));
   await save(join(run, 'plan.json'), p);
   console.log('plan', { groups: p.groups.length, creates: Object.fromEntries(Object.entries(p.creates).map(([k, v]) => [k, v.length])),
-    updates: Object.fromEntries(Object.entries(p.updates).map(([k, v]) => [k, v.length])), conflicts: p.conflicts.length });
+    updates: Object.fromEntries(Object.entries(p.updates).map(([k, v]) => [k, v.length])), conflicts: p.conflicts.length, retire_models: p.alignment?.retired.length ?? 0 });
 }
 export async function apply(run: string): Promise<void> {
   const p: Plan = await load(join(run, 'plan.json'));
+  if (p.alignment) {
+    assertReference(p.alignment.reference);
+    if (p.alignment.reference_sha !== sha(JSON.stringify(p.alignment.reference))) throw new Error('Company reference changed');
+    for (const sid of new Set(p.groups.map(g => g.series_id))) {
+      const packet = await load(join(run, `series-${sid}.json`));
+      for (const source of packet.sources as Source[]) if (sha(new Uint8Array(await Bun.file(join(run, source.file)).arrayBuffer())) !== source.sha256) throw new Error('Cached source changed before alignment apply');
+    }
+  }
+  if (p.alignment?.align_existing && !p.creates.models.length && !p.creates.trims.length) {
+    await (await import('./company-migration')).applyMigration(run, p); return;
+  }
   if (p.selection_sha !== sha(await Bun.file(join(run, 'selection.json')).text())) throw new Error('Selection changed or absent; full-catalog plans cannot be applied');
   if (!same(p.target, LAB) || p.source_sha !== sha(await Bun.file(join(run, 'collection.json')).text())) throw new Error('Plan scope changed');
   const fresh = { models: await snapshot('models', run, 'prewrite'), trims: await snapshot('trims', run, 'prewrite') };
@@ -276,10 +316,12 @@ export async function verify(run: string): Promise<void> {
     }
     for (const old of p.before[kind].rows) {
       const actual = byId[kind].get(old.record_id);
-      if (!actual) { mismatches.push({ missing_existing_record: old.record_id }); continue; }
+      if (!actual) { if (kind === 'models' && p.alignment?.retired.some(r => r.record_id === old.record_id)) continue;
+        mismatches.push({ missing_existing_record: old.record_id }); continue; }
       for (const f of p.before[kind].schema) {
         if (['formula', 'link', 'updated_at', 'updated_by'].includes(f.type) || empty(old[f.name]) || old[f.name] === false) continue;
         if (maintainedFields.has(f.name) && [...p.creates[kind], ...p.updates[kind]].some(r => r.prior_id === old.record_id && f.name in r.fields)) continue;
+        if (p.alignment?.align_existing && alignmentFields[kind].has(f.name) && p.updates[kind].some(r => r.prior_id === old.record_id && (f.name in r.fields || f.id in r.fields))) continue;
         if (kind === 'models' && f.name === 'last_synced_at' && receipt.synced_model_ids?.includes(old.record_id)) continue;
         if (!same(old[f.name], actual[f.name])) mismatches.push({ existing_value_changed: old.record_id, field: f.name });
       }
@@ -327,7 +369,7 @@ export async function verify(run: string): Promise<void> {
   const result = { ok: !mismatches.length, discovered_series: (await load(join(run, 'discovery.json'))).total, collected_series: collection.success,
     selected_series: (await load(join(run, 'selection.json'))).requested_series, scoped_models: new Set(p.groups.map(g => g.model_key)).size,
     full_discovery: collection.full_discovery, source_complete: collection.complete, failed_series: collection.failed, groups: p.groups.length, mapped_specs: p.groups.reduce((n, g) => n + g.spec_ids.length, 0),
-    lab_models: after.models.rows.length, lab_trims: after.trims.rows.length, created: receipt.created, updated: receipt.updated, uploads: receipt.uploads,
+    lab_models: after.models.rows.length, lab_trims: after.trims.rows.length, created: receipt.created, updated: receipt.updated, uploads: receipt.uploads, deleted_models: receipt.deleted_models ?? [],
     formula_checks: formulaChecks, formula_missing_inputs_or_values: formulaMissing, conflicts_preserved: p.conflicts.length,
     image_errors: p.pending.filter((x: any) => x.image_error), image_coverage: imageCoverage,
     retained_trims_outside_current_scope: after.trims.rows.filter(r => !covered.has(sourceIdentity(r)!)).map(r => r.trim_config_id), mismatches };
@@ -348,7 +390,7 @@ export async function writeAudit(run: string, p: Plan, after: Record<Kind, Snaps
     const parameter = (packet.sources as Source[]).filter(s => s.url.includes('getParamConf')).at(-1)!;
     const raw = await load(join(run, parameter.file));
     const candidates = interpret(raw.result, group.spec_ids, parameter.fetched_at);
-    const candidate = candidates.length === 1 ? candidates[0] : mergeParentGroups(candidates);
+    const candidate = p.alignment ? companyCandidates(candidates, p.alignment.reference)[0] : candidates.length === 1 ? candidates[0] : mergeParentGroups(candidates);
     const model = after.models.rows.find(r => r.record_id === ids.models[group.model_key])!;
     const attachment = (model.brochure_cover as { name: string; size: number }[] ?? []).map(p => ({ name: p.name, size: p.size }));
     const imageReason = group.images.length ? '本次下载校验并上传匹配配置照片，附件回读已核对。' : attachment.length ? '已有附件保留，本轮没有替换或重传。' :
@@ -359,6 +401,14 @@ export async function writeAudit(run: string, p: Plan, after: Record<Kind, Snaps
       const galleryUrl = packet.sources.find((s: Source) => s.url.includes('/cars/imglist'))?.url ?? parameter.url;
       const entry = auditField('models', group.model_key, f, f.name === 'brochure_cover' ? attachment : model[f.name],
         candidate.model[f.name], candidate, image ? galleryUrl : parameter.url, undefined, imageReason);
+      if (p.alignment && ['MODEL', 'brand', 'model', 'model_year'].includes(f.name)) {
+        const product = p.alignment.reference.models.find(m => m.model_id === group.model_key)!;
+        entry.category = '程序转换'; entry.reason = '产品英文名称及展示年款复用公司目录，不是汽车之家原名；展示年款不代表所有配置年款。公司留空则保留空。';
+        entry.raw = { autohome: entry.raw, company: { value: product.fields[f.name as keyof typeof product.fields], record_id: product.record_id,
+          revision: p.alignment.reference.source.models_rev, fetched_at: p.alignment.reference.source.fetched_at } };
+        entry.source_url = `https://ecn4k98ibq2i.feishu.cn/base/${p.alignment.reference.source.base_token}`;
+        entry.source_fields = [`公司产品.${f.name}`];
+      }
       if (image) {
         entry.source_fields = ['图库series/spec/picture身份'];
         entry.raw = packet.photos.filter((p: { spec_id: number }) => group.spec_ids.includes(p.spec_id)).map((p: { spec_id: number; category_id: number; source_url?: string }) => ({ ...p,
@@ -369,8 +419,14 @@ export async function writeAudit(run: string, p: Plan, after: Record<Kind, Snaps
     }
     for (const t of candidate.trims) {
       const key = `${group.series_id}/${t.spec_id}`, row = after.trims.rows.find(r => r.record_id === ids.trims[key])!;
-      for (const f of [...after.trims.schema].sort((a, b) => a.name.localeCompare(b.name))) entries.push(auditField('trims', key, f,
-        f.name === 'record_id' ? row._primary_text : row[f.name], t.fields[f.name], candidate, parameter.url, t.spec_id));
+      for (const f of [...after.trims.schema].sort((a, b) => a.name.localeCompare(b.name))) {
+        const entry = auditField('trims', key, f, f.name === 'record_id' ? row._primary_text : row[f.name], t.fields[f.name], candidate, parameter.url, t.spec_id);
+        if (p.alignment && f.name === 'trim_price_display') entry.reason = '人民币指导价÷6.74，四舍五入到整数美元；不是公开美元报价。';
+        if (p.alignment && ['trim', 'trim_config_id', 'record_id'].includes(f.name)) {
+          entry.category = '程序转换'; entry.reason = '对应配置ID匹配公司目录的英文名/业务编号；汽车之家中文原名保留在来源快照和notes。';
+        }
+        entries.push(entry);
+      }
     }
     const needs = entries.filter(e => e.table === 'models' && e.key === group.model_key && (empty(e.actual) || e.field === 'household_charging' && e.actual === false));
     summary.push(`## ${packet.name} / ${group.model_key}`, '', `本组${group.spec_ids.length}个在售配置；附件${attachment.length}张；待解释字段${needs.length}个。`, '', imageReason, '',

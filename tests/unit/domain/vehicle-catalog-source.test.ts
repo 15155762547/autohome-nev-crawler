@@ -64,7 +64,12 @@ describe('Autohome catalog contracts ported from the ES8 collector', () => {
     expect(interpret(erev, [1], 'now')[0].trims[0].fields.drivetrain_display).toEqual(['Dual-motor AWD']);
     const phev = structuredClone(erev); phev.datalist[0].paramconflist[0].itemname = '插电式混合动力';
     phev.datalist[0].paramconflist.at(-1)!.itemname = '前置四驱';
-    expect(interpret(phev, [1], 'now')[0].trims[0].fields.drivetrain_display).toEqual(['Front-engine AWD']);
+    expect(interpret(phev, [1], 'now')[0].trims[0].fields.drivetrain_display).toBeUndefined();
+    phev.titlelist[0].items.push({ itemname: '驱动电机数', titleid: 100 }, { itemname: '电机布局', titleid: 101 });
+    phev.datalist[0].paramconflist.push({ titleid: 100, itemname: '双电机' }, { titleid: 101, itemname: '前置+后置' });
+    expect(interpret(phev, [1], 'now')[0].trims[0].fields.drivetrain_display).toEqual(['Dual-motor AWD']);
+    const fwd = structuredClone(phev); fwd.datalist[0].paramconflist.find(c => c.titleid === 99)!.itemname = '前置前驱';
+    expect(interpret(fwd, [1], 'now')[0].trims[0].fields.drivetrain_display).toEqual(['Front motor FWD']);
     const electric = structuredClone(phev); electric.datalist[0].paramconflist[0].itemname = '增程式';
     expect(interpret(electric, [1], 'now')[0].trims[0].fields.drivetrain_display).toBeUndefined();
   });

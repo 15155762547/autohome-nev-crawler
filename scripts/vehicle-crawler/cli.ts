@@ -1,10 +1,11 @@
-import { resolve } from 'node:path';
+import { resolve, join } from 'node:path';
 import { discover, collect, select } from './collect';
 import { plan, apply, verify } from './feishu';
 import { exclusions } from './exclusions';
+import { reference } from './company-reference';
 
 const [command, directory, ...rest] = process.argv.slice(2);
-if (!directory || !['discover', 'exclusions', 'select', 'collect', 'plan', 'apply', 'verify'].includes(command)) {
+if (!directory || !['discover', 'exclusions', 'select', 'collect', 'reference', 'plan', 'apply', 'verify'].includes(command)) {
   console.error('bun scripts/vehicle-crawler/cli.ts discover|exclusions|select|collect|plan|apply|verify RUN_DIR [--count N | --series-ids IDS] --exclude FILE'); process.exit(1);
 }
 const run = resolve(directory);
@@ -24,6 +25,13 @@ if (command === 'collect') {
   if (limit !== undefined && (!Number.isInteger(limit) || limit <= 0)) throw new Error('Invalid limit');
   await collect(run, limit);
 }
-if (command === 'plan') await plan(run, !rest.includes('--skip-images'), rest.includes('--allow-partial'));
+if (command === 'reference') await reference(run);
+if (command === 'plan') {
+  const i = rest.indexOf('--company-reference');
+  if (i >= 0 && !rest[i + 1]) throw new Error('Missing company reference file');
+  const file = i >= 0 ? resolve(rest[i + 1]) : await Bun.file(join(run, 'company-reference.json')).exists() ? join(run, 'company-reference.json') : undefined;
+  if (!file && (await Bun.file(join(run, 'selection.json')).json()).series_ids.includes(8171)) throw new Error('Ti7 requires reference RUN before planning');
+  await plan(run, !rest.includes('--skip-images'), rest.includes('--allow-partial'), file, rest.includes('--align-existing'));
+}
 if (command === 'apply') await apply(run);
 if (command === 'verify') await verify(run);

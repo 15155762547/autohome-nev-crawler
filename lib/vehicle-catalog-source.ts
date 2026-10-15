@@ -137,8 +137,11 @@ export function interpret(input: unknown, allowed: number[], fetched: string): C
       const drive: Record<string, string> = { '双电机四驱': 'Dual-motor AWD', '前置前驱': 'Front motor FWD', '后置后驱': 'Rear motor RWD', '三电机四驱': 'Tri-motor AWD', '四电机四驱': 'Quad-motor AWD' };
       const c = chemistry[selected(s, index, '电池类型')]; if (c) fields.battery_chemistry = [c];
       const rawDrive = selected(s, index, '驱动方式');
-      const d = energy === 'PHEV' && rawDrive === '前置四驱' ? 'Front-engine AWD' :
-        energy === 'BEV' || rawDrive.includes('电机') ? drive[rawDrive] : undefined; if (d) fields.drivetrain_display = [d];
+      const count = selected(s, index, '驱动电机数'), layout = selected(s, index, '电机布局');
+      const d = energy === 'PHEV' && rawDrive === '前置四驱'
+        ? count === '双电机' && layout === '前置+后置' ? 'Dual-motor AWD' : undefined
+        : rawDrive === '前置前驱' || energy === 'BEV' || rawDrive.includes('电机') ? drive[rawDrive] : undefined;
+      if (d) fields.drivetrain_display = [d];
       if (selected(s, index, '快充功能') === '支持') fields.dc_fast_charge_supported = true;
       const w = /^(\d+)-(\d+)$/.exec(selected(s, index, '电池快充电量范围(%)'));
       if (w && Number(w[1]) < Number(w[2]) && Number(w[2]) <= 100) { fields.dc_fast_charge_min_percent = Number(w[1]); fields.dc_fast_charge_max_percent = Number(w[2]); }

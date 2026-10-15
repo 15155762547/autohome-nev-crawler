@@ -48,7 +48,7 @@ export function auditField(table: 'models' | 'trims', key: string, field: AuditF
   const names = ['common_features_json_pruned', 'base_spec_summary_json'].includes(field.name) ? Object.keys(index ?? {}) : fields[input ?? field.name] ?? [];
   const specs = evidence.flatMap(e => e.specs as { spec_id: number; raw: any[] }[] ?? []).filter(s => specId === undefined || s.spec_id === specId);
   const raw: unknown = names.length ? specs.map(s => ({ spec_id: s.spec_id, values: Object.fromEntries(names.map(n => [n,
-    n === '车型名称' ? group.trims.find(t => t.spec_id === s.spec_id)?.fields.trim : n === '车系名称' ? group.model.MODEL : n === '品牌' ? group.model.brand :
+    n === '车型名称' ? index ? selected({ paramconflist: s.raw }, index, n) : group.trims.find(t => t.spec_id === s.spec_id)?.fields.trim : n === '车系名称' ? group.model.MODEL : n === '品牌' ? group.model.brand :
       { value: index ? selected({ paramconflist: s.raw }, index, n) : '', cell: s.raw.find(c => c.titleid === index?.[n]) ?? null }])) })) : null;
   const present = !empty(actual) && !(field.type === 'checkbox' && actual === false), mapped = !empty(candidate);
   let category: string, reason: string;
