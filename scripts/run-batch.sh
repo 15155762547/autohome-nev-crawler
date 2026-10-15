@@ -18,7 +18,7 @@ command -v bun >/dev/null || { echo '请先安装Bun并加入PATH'; exit 1; }
 command -v lark-cli >/dev/null || { echo '请先安装lark-cli并登录shengxu profile'; exit 1; }
 run=".vehicle-crawler-runs/batch-$(date +%Y%m%d-%H%M%S)-$$"
 cli() { bun scripts/vehicle-crawler/cli.ts "$@"; }
-echo "本次明确选择：$series_ids；只同步现有试验表。"
+echo "本次明确选择：${series_ids}；只同步现有试验表。"
 echo "运行记录：$PWD/$run"
 mkdir -p "$run"
 git rev-parse HEAD > "$run/git-commit.txt" 2>/dev/null || true
