@@ -1,5 +1,6 @@
 import { mkdir } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, dirname, basename } from 'node:path';
+import { gunzipSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import sharp from 'sharp';
@@ -10,21 +11,32 @@ import { selectSeries } from '../../lib/vehicle-catalog-selection';
 export const BASE = 'https://www.autohome.com.cn/web-main/car/';
 export const sha = (v: Uint8Array | string) => createHash('sha256').update(v).digest('hex');
 export const save = async (file: string, value: unknown) => { await mkdir(join(file, '..'), { recursive: true }); await Bun.write(file, JSON.stringify(value, null, 2)); };
-export const load = (file: string) => Bun.file(file).json();
+export const load = async (file: string): Promise<any> => {
+  if (await Bun.file(file).exists()) return Bun.file(file).json();
+  const manifest = Bun.file(join(dirname(file), 'compressed-backups.json'));
+  if (await manifest.exists()) {
+    const item = (await manifest.json()).filter((x: any) => x.file === basename(file)).at(-1);
+    if (item) { const raw = gunzipSync(new Uint8Array(await Bun.file(join(dirname(file), item.compressed)).arrayBuffer()));
+      if (sha(raw) !== item.sha256) throw new Error('Compressed backup hash mismatch'); return JSON.parse(new TextDecoder().decode(raw)); }
+  }
+  return Bun.file(file).json();
+};
 export type Source = { url: string; final_url: string; fetched_at: string; sha256: string; file: string; mime: string };
 export type Photo = { spec_id: number; picture_id: number; src: string; category_id: number; source_url?: string };
 export const requestIntervalMs = Number(process.env.CRAWLER_REQUEST_INTERVAL_MS ?? 5000);
 if (!Number.isInteger(requestIntervalMs) || requestIntervalMs < 5000 || requestIntervalMs > 60000) throw new Error('CRAWLER_REQUEST_INTERVAL_MS must be 5000..60000');
-const scheduledFetch = createPublicFetcher(requestIntervalMs, { request: Object.assign((...args: Parameters<typeof fetch>) => fetch(...args), { preconnect: fetch.preconnect }), now: Date.now, sleep: ms => Bun.sleep(ms) });
+const scheduledFetch = createPublicFetcher(requestIntervalMs, { request: Object.assign((...args: Parameters<typeof fetch>) => fetch(...args), { preconnect: fetch.preconnect }), now: Date.now, sleep: ms => Bun.sleep(ms), shouldStop: async () => Boolean(process.env.CRAWLER_STOP_FILE && await Bun.file(process.env.CRAWLER_STOP_FILE).exists()) });
 export async function fetchPublic(url: string): Promise<{ raw: Uint8Array; final: string; mime: string }> {
   const host = new URL(url).hostname;
   if (!url.startsWith('https://') || !/(?:^|\.)(autohome\.com\.cn|autoimg\.cn)$/.test(host)) throw new Error('Unapproved source host');
   return scheduledFetch(url);
 }
 export async function source(run: string, key: string, url: string): Promise<{ info: Source; raw: Uint8Array }> {
+  if (process.env.CRAWLER_STOP_FILE && await Bun.file(process.env.CRAWLER_STOP_FILE).exists()) throw new PublicAccessPaused('Operator STOP file present');
   const x = await fetchPublic(url), file = `${key}.raw`;
   const info = { url, final_url: x.final, fetched_at: new Date().toISOString(), sha256: sha(x.raw), file, mime: x.mime };
   await Bun.write(join(run, file), x.raw); await save(join(run, `${key}.source.json`), info);
+  if (process.env.CRAWLER_PROGRESS_FILE) await save(process.env.CRAWLER_PROGRESS_FILE, { pid: process.pid, last_response_at: info.fetched_at, url, series_run: run });
   if (x.final !== url) throw new Error(`Unexpected redirect: ${url} -> ${x.final}`);
   return { info, raw: x.raw };
 }
@@ -89,6 +101,7 @@ export function verifyUpcoming(html: string, sid: number, id: number): string {
   return b.specname;
 }
 export async function collect(run: string, limit?: number, images = true): Promise<void> {
+  if ((await load(join(run, 'selection.json'))).all_sales_states) return (await import('./collect-all')).collectAll(run, limit);
   const discovery = await load(join(run, 'discovery.json'));
   if (!discovery.complete) throw new Error('Incomplete discovery');
   const selection = await load(join(run, 'selection.json'));
@@ -176,7 +189,7 @@ export async function select(run: string, count: number, exclusionFile: string, 
   if (!d.complete || exclusions.complete !== true || !Array.isArray(exclusions.series_ids)) throw new Error('Discovery/exclusion contract incomplete');
   const ids = selectSeries(d.series.map((s: { seriesid: number }) => s.seriesid), exclusions.series_ids, count, seriesId);
   if (upcomingSpecIds.length && (ids.length !== 1 || upcomingSpecIds.some(id => !Number.isInteger(id) || id <= 0) || new Set(upcomingSpecIds).size !== upcomingSpecIds.length)) throw new Error('Upcoming selection requires one series and unique positive spec IDs');
-  await save(join(run, 'selection.json'), { complete: true, upcoming_spec_ids: upcomingSpecIds, requested_series: count, series_ids: ids, excluded_series_ids: exclusions.series_ids,
+  await save(join(run, 'selection.json'), { complete: true, all_sales_states: Boolean(d.all_sales_states), upcoming_spec_ids: upcomingSpecIds, requested_series: count, series_ids: ids, excluded_series_ids: exclusions.series_ids,
     exclusion_sha: sha(await Bun.file(exclusionFile).text()), discovery_sha: sha(await Bun.file(join(run, 'discovery.json')).text()), selected_at: new Date().toISOString() });
   console.log(`selected ${ids.length} series after exclusions`);
 }
@@ -197,4 +210,11 @@ export async function downloadPhotos(run: string, group: Candidate, candidates: 
     await Bun.write(join(run, file), x.raw);
     return { ...p, file, size: x.raw.length, sha256: x.info.sha256, width: meta.width, height: meta.height };
   }));
+}
+
+export function parameterSource(packet: any): Source {
+ return packet.parameter_source ?? (packet.sources as Source[]).filter(s => s.url.includes('getParamConf')).at(-1)!;
+}
+export async function readParameters(run: string, packet: any) {
+ const p=parameterSource(packet);if(sha(new Uint8Array(await Bun.file(join(run,p.file)).arrayBuffer()))!==p.sha256)throw new Error('Parameter/derived snapshot hash changed');return load(join(run,p.file));
 }

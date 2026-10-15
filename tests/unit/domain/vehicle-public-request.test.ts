@@ -36,3 +36,7 @@ test('JSON access-limit messages also pause the process', async () => {
   await expect(get('https://www.autohome.com.cn/b')).rejects.toBeInstanceOf(PublicAccessPaused);
   expect(calls).toBe(1);
 });
+test('operator stop is checked after pacing delay, before issuing the next request', async()=>{
+ const f=fake();const get=createPublicFetcher(5,{...f.runtime,shouldStop:async()=>true});
+ await expect(get('https://www.autohome.com.cn/a')).rejects.toBeInstanceOf(PublicAccessPaused);expect(f.starts).toHaveLength(0);
+});

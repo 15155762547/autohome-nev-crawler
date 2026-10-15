@@ -2,8 +2,9 @@ import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { empty, interpret, matchesFormulaNumber, mergeParentGroups, protectedFields, same, sourceIdentity, type Candidate, type Cells } from '../../lib/vehicle-catalog-source';
-import { load, save, sha, downloadPhotos, type Source } from './collect';
+import { load, save, sha, downloadPhotos, parameterSource, readParameters, type Source } from './collect';
 import { auditField, auditNotes, csvAudit, maintainedFields, calculatedFields, reconcileMaintained, type AuditEntry } from '../../lib/vehicle-catalog-audit';
+import { catalogueSchema, catalogueCandidates, cataloguePatch, catalogueRefreshFields, type Catalogue } from '../../lib/vehicle-catalogue-grouping';
 import { referenceSchema, assertReference, companyCandidates, alignmentPatch, alignmentFields, seagullScopePatch, seagullScopeFields, type CompanyReference, type Retirement } from '../../lib/vehicle-company-reference';
 
 export const LAB = { base_token: 'EB60b9omTaMyZzsJ273cKdL8nkb', profile: 'shengxu',
@@ -17,6 +18,8 @@ export type Plan = { target: typeof LAB; source_sha: string; selection_sha: stri
   updates: Record<Kind, Planned[]>; model_ids: Record<string, string>; conflicts: unknown[]; pending: unknown[];
     groups: { key: string; model_key: string; series_id: number; spec_ids: number[]; images: Awaited<ReturnType<typeof downloadPhotos>> }[];
   refresh_seagull_scope?: boolean;
+  catalogue?: { snapshot: Catalogue; sha256: string };
+  skipped_series?: { series_id: number; reason: string }[];
   alignment?: { reference: CompanyReference; reference_sha: string; align_existing: boolean; retired: Retirement[] } };
 
 export function guardWrite(args: string[]): void {
@@ -87,7 +90,7 @@ function unique(rows: Cells[], key: (r: Cells) => string | null): Map<string, Ce
   for (const row of rows) { const k = key(row); if (!k) throw new Error('Unresolved existing source identity'); if (m.has(k)) throw new Error(`Duplicate existing key ${k}`); m.set(k, row); }
   return m;
 }
-export async function plan(run: string, images = true, allowPartial = false, companyFile?: string, alignExisting = false, refreshSeagullScope = false): Promise<void> {
+export async function plan(run: string, images = true, allowPartial = false, companyFile?: string, alignExisting = false, refreshSeagullScope = false, catalogueFile?: string): Promise<void> {
   const collection = await load(join(run, 'collection.json'));
   const selection = await load(join(run, 'selection.json'));
   if (!same(collection.scope, selection.series_ids) || !selection.complete || collection.scope.some((sid: number) => selection.excluded_series_ids.includes(sid))) throw new Error('Collection differs from the approved bounded selection');
@@ -111,10 +114,16 @@ export async function plan(run: string, images = true, allowPartial = false, com
     if (!p.alignment || !same(selection.series_ids, [6762]) || !same(selection.upcoming_spec_ids, [78508])) throw new Error('Seagull scope refresh requires company reference and explicit 6762 / 78508 selection');
     p.refresh_seagull_scope = true;
   }
+  if (catalogueFile) {
+    if (companyFile || alignExisting || refreshSeagullScope) throw new Error('Catalogue mode cannot combine legacy migrations');
+    const c = catalogueSchema.parse(await load(catalogueFile)); p.catalogue = { snapshot: c, sha256: sha(JSON.stringify(c)) }; p.skipped_series = [];
+  }
   const add = (kind: Kind, key: string, desired: Cells, prior?: Cells, modelKey?: string) => {
     const { patch, conflicts } = reconcileMaintained(prior, desired);
     const overrides = p.alignment?.align_existing ? alignmentPatch(kind, prior, desired) : {};
     if (p.refresh_seagull_scope && kind === 'models') Object.assign(overrides, seagullScopePatch(prior, desired));
+    if (p.catalogue && kind === 'models') Object.assign(overrides, cataloguePatch(prior, desired));
+    if (p.catalogue && kind === 'trims') for (const field of ['trim_order', 'notes', 'source_url']) if (field in desired && !same(prior?.[field], desired[field])) overrides[field] = desired[field];
     Object.assign(patch, overrides);
     p.conflicts.push(...conflicts.filter(c => !(c.field in overrides)).map(c => ({ table: kind, key, ...c })));
     validateFields(patch, before[kind].schema);
@@ -128,16 +137,24 @@ export async function plan(run: string, images = true, allowPartial = false, com
     if (collection.failed.some((x: { series_id: number }) => x.series_id === sid)) continue;
     const packet = await load(join(run, `series-${sid}.json`));
     for (const s of packet.sources as Source[]) if (sha(new Uint8Array(await Bun.file(join(run, s.file)).arrayBuffer())) !== s.sha256) throw new Error('Source hash changed before planning');
-    if (!same(packet.upcoming_spec_ids ?? [], selection.upcoming_spec_ids ?? [])) throw new Error('Packet sales scope differs from selection');
+    if (Boolean(packet.all_sales_states) !== Boolean(selection.all_sales_states)) throw new Error('Packet sales policy differs from selection');
+    if (!selection.all_sales_states && !same(packet.upcoming_spec_ids ?? [], selection.upcoming_spec_ids ?? [])) throw new Error('Packet sales scope differs from selection');
     // Mapping is rerunnable from preserved raw responses when rules evolve; collection stays immutable.
-    const parameter = (packet.sources as Source[]).filter(s => s.url.includes('getParamConf')).at(-1)!;
-    const raw = await load(join(run, parameter.file));
+    const parameter = parameterSource(packet);
+    const raw = await readParameters(run, packet);
     if (raw.returncode !== 0 || raw.result?.bread?.seriesid !== sid) throw new Error('Source parameter identity mismatch');
     let candidates = interpret(raw.result, packet.spec_ids, parameter.fetched_at);
     if (p.alignment) candidates = companyCandidates(candidates, p.alignment.reference);
+    if (p.catalogue) {
+      try { candidates = catalogueCandidates(candidates, p.catalogue.snapshot, before.models.rows, before.trims.rows); }
+      catch (error) { p.skipped_series!.push({ series_id: sid, reason: String(error) }); continue; }
+    }
+    if (packet.spec_provenance) for (const g of candidates) for (const t of g.trims) {
+      const evidence = packet.spec_provenance[t.spec_id]; t.fields.last_verified_at = evidence.fetched_at; t.fields.source_url = evidence.url;
+    }
     const assigned = new Map<string, Candidate[]>();
     for (const sourceGroup of candidates) {
-      if (p.alignment) { assigned.set(sourceGroup.key, [sourceGroup]); continue; }
+      if (p.alignment || p.catalogue) { assigned.set(sourceGroup.key, [sourceGroup]); continue; }
       const parents = [...new Set(sourceGroup.trims.map(t => trims.get(`${sid}/${t.spec_id}`)?.model_id).filter(Boolean))] as string[];
       for (const parent of new Set([...parents, ...(sourceGroup.trims.some(t => !trims.has(`${sid}/${t.spec_id}`)) ? [parents.length === 1 ? parents[0] : sourceGroup.key] : [])])) {
         const subset = sourceGroup.trims.filter(t => (trims.get(`${sid}/${t.spec_id}`)?.model_id ?? (parents.length === 1 ? parents[0] : sourceGroup.key)) === parent);
@@ -182,15 +199,17 @@ export async function plan(run: string, images = true, allowPartial = false, com
       const airbagNote = auditField('models', modelKey, { name: 'airbags', type: 'number' }, desired.airbags, desired.airbags, g, parameter.url).reason;
       const scopeNote = p.refresh_seagull_scope ? `销售范围：${packet.on_sale_spec_ids.length}款在售 + ${packet.upcoming_spec_ids.length}款预售/即将上市（${packet.upcoming_spec_ids.join(',')}）。预售价格和未披露参数留空。\n新旧尺寸不同，models共享尺寸留空，各款尺寸/座位数保存在base_spec_summary_json。\n后备厢930L、对外放电及3.3kW仅适用于原8款已披露配置，不能推及预售款；8款刀片电池明确，预售未披露，共享技术字段留空。\n78508公司英文名历史年款已按来源改为2027，名称其余部分沿用公司；model_year为公司展示年款，不代表全部配置。\n` : '';
       desired.review_notes = auditNotes(prior?.review_notes, `来源：${parameter.url}\n来源采集时间：${parameter.fetched_at}\n本组配置：${currentIds.join(',')}\n` +
-        scopeNote + `安全气囊：${airbagNote}\n` + missing.sort((a, b) => a.field.localeCompare(b.field)).map(e => `${e.field}：${e.reason}`).join('\n'));
+        scopeNote + (packet.all_sales_states ? `全状态范围：${Object.values(packet.sales_states).map((s: any) => s.label).filter((v: string, i: number, a: string[]) => a.indexOf(v) === i).join('、')}；共${currentIds.length}款，参数失败${packet.failed_specs.length}款。年款保留在配置；共同字段不同/未知时留空，气囊采用已披露最大值。停售不等于已证实停产，目录业务status不作销售状态。\n` : '') + `安全气囊：${airbagNote}\n` + missing.sort((a, b) => a.field.localeCompare(b.field)).map(e => `${e.field}：${e.reason}`).join('\n'));
       add('models', modelKey, desired, prior);
       for (const t of g.trims) {
         const key = `${sid}/${t.spec_id}`, old = trims.get(key);
-        if (packet.upcoming_spec_ids?.includes(t.spec_id)) {
+        if (packet.all_sales_states) t.fields.notes = String(t.fields.notes) + ` Source sale label: ${packet.sales_states[t.spec_id]?.label}; scope=all-public-sale-states; raw state=${packet.sales_states[t.spec_id]?.state}.`;
+        if (!packet.all_sales_states && packet.upcoming_spec_ids?.includes(t.spec_id)) {
           t.fields.notes = String(t.fields.notes) + ` Sales status: upcoming / 预售; verified https://www.autohome.com.cn/spec/${t.spec_id}/ ; unknown price and undisclosed values left blank. Company historical English alias: ${p.alignment?.reference.models.flatMap(m => m.specs).find(s => s.spec_id === t.spec_id)?.trim ?? ''}.`;
         }
         if (old && !p.alignment?.align_existing && !empty(old.vehicle_model_pruned) && !same(old.vehicle_model_pruned, [{ id: prior?.record_id }])) throw new Error(`Existing parent link disagrees with model_id: ${key}`);
         const record: Cells = { ...t.fields, model_id: modelKey, trim_config_id: p.alignment ? t.fields.trim_config_id : old?.trim_config_id ?? t.fields.trim_config_id };
+        if (p.catalogue && packet.all_sales_states) record.notes = auditNotes(old?.notes ?? t.fields.notes, `来源销售状态：${packet.sales_states[t.spec_id]?.label}；来源状态参数：${packet.sales_states[t.spec_id]?.state}；核验时间：${record.last_verified_at}；来源：${record.source_url}。停售不能直接视为已证实停产。`);
         const fid = before.trims.schema.find(f => f.name === 'record_id')!.id;
         if (!old || empty(old._primary_text) || p.alignment?.align_existing && old._primary_text !== record.trim_config_id) record[fid] = record.trim_config_id;
         if (p.alignment?.align_existing && old && !same(old.vehicle_model_pruned, [{ id: prior?.record_id }])) record.vehicle_model_pruned = [{ id: prior!.record_id }];
@@ -218,11 +237,13 @@ export async function plan(run: string, images = true, allowPartial = false, com
 }
 export async function apply(run: string): Promise<void> {
   const p: Plan = await load(join(run, 'plan.json'));
-  if (p.alignment) {
-    assertReference(p.alignment.reference);
-    if (p.alignment.reference_sha !== sha(JSON.stringify(p.alignment.reference))) throw new Error('Company reference changed');
+  if (p.catalogue && p.catalogue.sha256 !== sha(JSON.stringify(p.catalogue.snapshot))) throw new Error('Catalogue snapshot changed');
+  if (p.alignment || p.catalogue) {
+    if (p.alignment) assertReference(p.alignment.reference);
+    if (p.alignment && p.alignment.reference_sha !== sha(JSON.stringify(p.alignment.reference))) throw new Error('Company reference changed');
     for (const sid of new Set(p.groups.map(g => g.series_id))) {
       const packet = await load(join(run, `series-${sid}.json`));
+      await readParameters(run, packet);
       for (const source of packet.sources as Source[]) if (sha(new Uint8Array(await Bun.file(join(run, source.file)).arrayBuffer())) !== source.sha256) throw new Error('Cached source changed before alignment apply');
     }
   }
@@ -324,7 +345,7 @@ export async function verify(run: string): Promise<void> {
       for (const [field, value] of Object.entries(r.fields)) {
         const f = after[kind].schema.find(f => f.id === field);
         const got = f?.name === 'record_id' ? actual?._primary_text : actual?.[field];
-        if (!same(got, value)) mismatches.push({ table: kind, key: r.key, field, expected: value, actual: got });
+        if (!same(got, value) && !(p.catalogue && empty(got) && empty(value))) mismatches.push({ table: kind, key: r.key, field, expected: value, actual: got });
       }
     }
     for (const old of p.before[kind].rows) {
@@ -335,6 +356,8 @@ export async function verify(run: string): Promise<void> {
         if (['formula', 'link', 'updated_at', 'updated_by'].includes(f.type) || empty(old[f.name]) || old[f.name] === false) continue;
         if ((maintainedFields.has(f.name) || calculatedFields.has(f.name)) && [...p.creates[kind], ...p.updates[kind]].some(r => r.prior_id === old.record_id && f.name in r.fields)) continue;
         if (p.alignment?.align_existing && alignmentFields[kind].has(f.name) && p.updates[kind].some(r => r.prior_id === old.record_id && (f.name in r.fields || f.id in r.fields))) continue;
+        if (p.catalogue && kind === 'trims' && ['trim_order', 'notes', 'source_url'].includes(f.name) && p.updates.trims.some(r => r.prior_id === old.record_id && f.name in r.fields)) continue;
+        if (p.catalogue && kind === 'models' && catalogueRefreshFields.has(f.name) && p.updates.models.some(r => r.prior_id === old.record_id && f.name in r.fields)) continue;
         if (p.refresh_seagull_scope && kind === 'models' && old.model_id === 'MDL-002' && seagullScopeFields.has(f.name) && p.updates.models.some(r => r.prior_id === old.record_id && f.name in r.fields)) continue;
         if (kind === 'models' && f.name === 'last_synced_at' && receipt.synced_model_ids?.includes(old.record_id)) continue;
         if (!same(old[f.name], actual[f.name])) mismatches.push({ existing_value_changed: old.record_id, field: f.name });
@@ -370,6 +393,8 @@ export async function verify(run: string): Promise<void> {
   const collection = await load(join(run, 'collection.json'));
   const coverage = [];
   for (const sid of collection.scope as number[]) {
+    const review = p.skipped_series?.find(s => s.series_id === sid);
+    if (review) { coverage.push({ ...review, status: 'grouping_review' }); continue; }
     const failed = collection.failed.find((x: { series_id: number }) => x.series_id === sid);
     if (failed) { coverage.push({ ...failed, status: 'source_failed' }); continue; }
     const packet = await load(join(run, `series-${sid}.json`));
@@ -382,7 +407,7 @@ export async function verify(run: string): Promise<void> {
   const imageCoverage = p.groups.map(g => ({ model: g.model_key, attachments: (byId.models.get(receipt.ids.models[g.model_key])!.brochure_cover as unknown[] ?? []).length }));
   const result = { ok: !mismatches.length, discovered_series: (await load(join(run, 'discovery.json'))).total, collected_series: collection.success,
     selected_series: (await load(join(run, 'selection.json'))).requested_series, scoped_models: new Set(p.groups.map(g => g.model_key)).size,
-    full_discovery: collection.full_discovery, source_complete: collection.complete, failed_series: collection.failed, groups: p.groups.length, mapped_specs: p.groups.reduce((n, g) => n + g.spec_ids.length, 0),
+    grouping_reviews: p.skipped_series ?? [], failed_specs: collection.failed_specs ?? [], full_discovery: collection.full_discovery, source_complete: collection.complete, failed_series: collection.failed, groups: p.groups.length, mapped_specs: p.groups.reduce((n, g) => n + g.spec_ids.length, 0),
     lab_models: after.models.rows.length, lab_trims: after.trims.rows.length, created: receipt.created, updated: receipt.updated, uploads: receipt.uploads, deleted_models: receipt.deleted_models ?? [],
     formula_checks: formulaChecks, formula_missing_inputs_or_values: formulaMissing, conflicts_preserved: p.conflicts.length,
     image_errors: p.pending.filter((x: any) => x.image_error), image_coverage: imageCoverage,
@@ -401,10 +426,10 @@ export async function writeAudit(run: string, p: Plan, after: Record<Kind, Snaps
   const entries: AuditEntry[] = [], summary: string[] = ['# 选定车系字段质量报告', '', '同步回读通过与字段完整程度分别报告；false默认值不是“不支持”的证据。', ''];
   for (const group of p.groups) {
     const packet = await load(join(run, `series-${group.series_id}.json`));
-    const parameter = (packet.sources as Source[]).filter(s => s.url.includes('getParamConf')).at(-1)!;
-    const raw = await load(join(run, parameter.file));
+    const parameter = parameterSource(packet);
+    const raw = await readParameters(run, packet);
     const candidates = interpret(raw.result, group.spec_ids, parameter.fetched_at);
-    const candidate = p.alignment ? companyCandidates(candidates, p.alignment.reference)[0] : candidates.length === 1 ? candidates[0] : mergeParentGroups(candidates);
+    const candidate = p.catalogue ? catalogueCandidates(candidates, p.catalogue.snapshot, p.before.models.rows, p.before.trims.rows).find(g => g.key === group.model_key)! : p.alignment ? companyCandidates(candidates, p.alignment.reference)[0] : candidates.length === 1 ? candidates[0] : mergeParentGroups(candidates);
     const model = after.models.rows.find(r => r.record_id === ids.models[group.model_key])!;
     const attachment = (model.brochure_cover as { name: string; size: number }[] ?? []).map(p => ({ name: p.name, size: p.size }));
     const imageReason = group.images.length ? '本次下载校验并上传匹配配置照片，附件回读已核对。' : attachment.length ? '已有附件保留，本轮没有替换或重传。' :
@@ -416,6 +441,7 @@ export async function writeAudit(run: string, p: Plan, after: Record<Kind, Snaps
       const galleryUrl = packet.sources.find((s: Source) => s.url.includes('/cars/imglist'))?.url ?? parameter.url;
       const entry = auditField('models', group.model_key, f, f.name === 'brochure_cover' ? attachment : model[f.name],
         candidate.model[f.name], candidate, image ? galleryUrl : parameter.url, undefined, imageReason);
+      if (p.catalogue && ['MODEL', 'brand', 'model', 'model_year'].includes(f.name)) { entry.category = '程序转换'; entry.reason = '按公司唯一产品身份沿用名称/展示年款，无匹配时保留来源中文；真实年款保留在配置。'; }
       if (p.alignment && ['MODEL', 'brand', 'model', 'model_year'].includes(f.name)) {
         const product = p.alignment.reference.models.find(m => m.model_id === group.model_key)!;
         entry.category = '程序转换'; entry.reason = '产品英文名称及展示年款复用公司目录，不是汽车之家原名；展示年款不代表所有配置年款。公司留空则保留空。';
@@ -444,7 +470,7 @@ export async function writeAudit(run: string, p: Plan, after: Record<Kind, Snaps
       }
     }
     const needs = entries.filter(e => e.table === 'models' && e.key === group.model_key && (empty(e.actual) || e.field === 'household_charging' && e.actual === false));
-    summary.push(`## ${packet.name} / ${group.model_key}`, '', `本组${group.spec_ids.length}个配置（在售${packet.on_sale_spec_ids?.length ?? group.spec_ids.length}，预售${packet.upcoming_spec_ids?.length ?? 0}）；附件${attachment.length}张；待解释字段${needs.length}个。`, '', imageReason, '',
+    summary.push(`## ${packet.name} / ${group.model_key}`, '', `本组${group.spec_ids.length}个配置（在售${packet.on_sale_spec_ids?.length ?? group.spec_ids.length}，预售/未售${packet.upcoming_spec_ids?.length ?? 0}，停售${packet.all_sales_states ? Object.values(packet.sales_states).filter((s: any) => s.state === 1).length : 0}）；附件${attachment.length}张；待解释字段${needs.length}个。`, '', imageReason, '',
       ...needs.map(e => `- ${e.field}（${e.label}）：${e.category}；${e.reason}`), '');
   }
   await save(join(run, 'field-audit.json'), entries); await Bun.write(join(run, 'field-audit.csv'), csvAudit(entries));

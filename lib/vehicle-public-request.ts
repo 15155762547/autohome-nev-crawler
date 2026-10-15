@@ -1,6 +1,6 @@
 export class PublicAccessPaused extends Error {}
 type Download = { raw: Uint8Array; final: string; mime: string };
-type Runtime = { request: typeof fetch; now: () => number; sleep: (ms: number) => Promise<unknown> };
+type Runtime = { request: typeof fetch; now: () => number; sleep: (ms: number) => Promise<unknown>; shouldStop?: () => Promise<boolean> };
 /** One request at a time, including discovery, retries and galleries. Never retry an access challenge. */
 export function createPublicFetcher(intervalMs: number, runtime: Runtime) {
   let queue = Promise.resolve(), finished = -Infinity, paused: PublicAccessPaused | undefined;
@@ -9,6 +9,7 @@ export function createPublicFetcher(intervalMs: number, runtime: Runtime) {
       if (paused) throw paused;
       const delay = Math.max(0, intervalMs - (runtime.now() - finished));
       if (delay) await runtime.sleep(delay);
+      if (await runtime.shouldStop?.()) { paused = new PublicAccessPaused('Operator requested STOP'); throw paused; }
       try {
         const r = await runtime.request(url, { headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json,text/html,image/*' }, signal: AbortSignal.timeout(30000) });
         const raw = new Uint8Array(await r.arrayBuffer()), mime = r.headers.get('content-type') ?? '';
