@@ -65,12 +65,18 @@ export async function snapshot(kind: Kind, directory: string, label: string): Pr
   }
   if (kind === 'trims') {
     const fid = schema.find(f => f.name === 'record_id')!.id, ids = [...rows.keys()];
-    for (let start = 0; start < ids.length; start += 200) {
-      const r = await call(['+record-get', ...args(kind), '--field-id', fid, '--format', 'json', ...ids.slice(start, start + 200).flatMap(id => ['--record-id', id])]);
-      const matrix = r.data;
-      if (matrix.has_more || matrix.field_id_list[0] !== fid || matrix.record_id_list.length !== ids.slice(start, start + 200).length) throw new Error('Incomplete primary matrix');
-      if (matrix.rev !== rev) throw new Error('Concurrent edit during primary matrix read');
-      matrix.record_id_list.forEach((id: string, i: number) => { rows.get(id)!._primary_text = matrix.data[i][0]; });
+    // Bound read-only concurrency to two; retain every cell and revision check.
+    for (let start = 0; start < ids.length; start += 400) {
+      const batches = [ids.slice(start, start + 200), ids.slice(start + 200, start + 400)].filter(b => b.length);
+      const responses = await Promise.allSettled(batches.map(async batch => ({ batch, matrix: (await call(['+record-get', ...args(kind), '--field-id', fid, '--format', 'json', ...batch.flatMap(id => ['--record-id', id])])).data })));
+      for (const response of responses) {
+        if (response.status === 'rejected') throw response.reason;
+        const { batch, matrix } = response.value;
+        if (matrix.has_more || matrix.field_id_list.length !== 1 || matrix.field_id_list[0] !== fid ||
+            !same([...matrix.record_id_list].sort(), [...batch].sort()) || matrix.data.length !== batch.length || matrix.data.some((r: unknown[]) => r.length !== 1)) throw new Error('Incomplete primary matrix');
+        if (matrix.rev !== rev) throw new Error('Concurrent edit during primary matrix read');
+        matrix.record_id_list.forEach((id: string, i: number) => { rows.get(id)!._primary_text = matrix.data[i][0]; });
+      }
     }
   }
   const result = { schema, rows: [...rows.values()], rev: rev! }; await save(join(directory, `${kind}-${label}.json`), result); return result;

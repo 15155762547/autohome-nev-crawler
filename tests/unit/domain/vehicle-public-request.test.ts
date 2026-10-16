@@ -40,3 +40,7 @@ test('operator stop is checked after pacing delay, before issuing the next reque
  const f=fake();const get=createPublicFetcher(5,{...f.runtime,shouldStop:async()=>true});
  await expect(get('https://www.autohome.com.cn/a')).rejects.toBeInstanceOf(PublicAccessPaused);expect(f.starts).toHaveLength(0);
 });
+
+test('accelerated three-second pacing remains serialized after each response', async()=>{
+ const f=fake(),get=createPublicFetcher(3000,f.runtime);await Promise.all([get('https://www.autohome.com.cn/a'),get('https://www.autohome.com.cn/b'),get('https://www.autohome.com.cn/c')]);expect(f.starts).toEqual([0,3002,6004]);
+});

@@ -24,7 +24,7 @@ export const load = async (file: string): Promise<any> => {
 export type Source = { url: string; final_url: string; fetched_at: string; sha256: string; file: string; mime: string };
 export type Photo = { spec_id: number; picture_id: number; src: string; category_id: number; source_url?: string };
 export const requestIntervalMs = Number(process.env.CRAWLER_REQUEST_INTERVAL_MS ?? 5000);
-if (!Number.isInteger(requestIntervalMs) || requestIntervalMs < 5000 || requestIntervalMs > 60000) throw new Error('CRAWLER_REQUEST_INTERVAL_MS must be 5000..60000');
+if (!Number.isInteger(requestIntervalMs) || requestIntervalMs < 3000 || requestIntervalMs > 60000) throw new Error('CRAWLER_REQUEST_INTERVAL_MS must be 3000..60000');
 const scheduledFetch = createPublicFetcher(requestIntervalMs, { request: Object.assign((...args: Parameters<typeof fetch>) => fetch(...args), { preconnect: fetch.preconnect }), now: Date.now, sleep: ms => Bun.sleep(ms), shouldStop: async () => Boolean(process.env.CRAWLER_STOP_FILE && await Bun.file(process.env.CRAWLER_STOP_FILE).exists()) });
 export async function fetchPublic(url: string): Promise<{ raw: Uint8Array; final: string; mime: string }> {
   const host = new URL(url).hostname;

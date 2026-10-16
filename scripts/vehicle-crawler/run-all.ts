@@ -1,5 +1,5 @@
 import{join,resolve}from'node:path';import{mkdir,open,unlink,rename,copyFile,statfs}from'node:fs/promises';
-import{discoverAll}from'./discover-all';import{catalogueReference}from'./catalogue-reference';import{collect,select,load,save,sha}from'./collect';import{plan,apply,verify}from'./feishu';import{archiveBatch}from'./archive-batch';
+import{discoverAll}from'./discover-all';import{catalogueReference}from'./catalogue-reference';import{collect,select,load,save,sha,requestIntervalMs}from'./collect';import{plan,apply,verify}from'./feishu';import{archiveBatch}from'./archive-batch';
 const root=resolve(process.argv[2]??'');if(!process.argv[2])throw Error('Explicit run directory required');const resume=process.argv.includes('--resume'),batchSize=10,restMs=15000;
 await mkdir(root,{recursive:true});const lock=join(root,'runner.lock');
 if(await Bun.file(lock).exists()){const pid=Number(await Bun.file(lock).text());let alive=false;try{process.kill(pid,0);alive=true;}catch{}if(alive||!resume)throw Error('Runner lock exists; inspect status or explicitly resume stale runner');await unlink(lock);}
@@ -21,7 +21,7 @@ try{
   queue={series_ids:ids,discovery_sha:sha(await Bun.file(join(root,'discovery.json')).text())};await save(queueFile,queue);
  }
  if(queue.discovery_sha!==sha(await Bun.file(join(root,'discovery.json')).text()))throw Error('Directory changed after queue creation');
- await checkpoint({total_series:queue.series_ids.length,total_batches:Math.ceil(queue.series_ids.length/batchSize),rest_ms:restMs,code_commit:process.env.CRAWLER_CODE_COMMIT??((await Bun.file(join(root,'git-commit.txt')).exists())?(await Bun.file(join(root,'git-commit.txt')).text()).trim():'not-recorded')});
+ await checkpoint({total_series:queue.series_ids.length,total_batches:Math.ceil(queue.series_ids.length/batchSize),rest_ms:restMs,request_interval_ms:requestIntervalMs,primary_read_concurrency:2,code_commit:process.env.CRAWLER_CODE_COMMIT??((await Bun.file(join(root,'git-commit.txt')).exists())?(await Bun.file(join(root,'git-commit.txt')).text()).trim():'not-recorded')});
  for(let start=state.cursor??0;start<queue.series_ids.length;start+=batchSize){
   if(await stopped())throw Error('Operator requested STOP');const disk=await statfs(root);if(disk.bavail*disk.bsize<2*1024**3)throw Error('Less than 2GiB disk free; pause to preserve artifacts');const ids=queue.series_ids.slice(start,start+batchSize),dir=join(root,`batch-${String(start/batchSize+1).padStart(4,'0')}`);await mkdir(dir,{recursive:true});
   await save(join(dir,'code-commit.json'),{commit:process.env.CRAWLER_CODE_COMMIT??'not-recorded',started_at:new Date().toISOString()});
