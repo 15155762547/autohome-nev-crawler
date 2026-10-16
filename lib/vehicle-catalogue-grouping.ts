@@ -30,6 +30,6 @@ export function catalogueCandidates(groups:Candidate[],catalogue:Catalogue,model
   return g;
  });
 }
-export function cataloguePatch(old:Cells|undefined,desired:Cells):Cells{
- return Object.fromEntries([...catalogueRefreshFields].filter(f=>f in desired&&!(empty(old?.[f])&&empty(desired[f]))&&!same(old?.[f],desired[f])).map(f=>[f,desired[f]]));
+export function cataloguePatch(old:Cells|undefined,desired:Cells,preserveUnknown=false):Cells{
+ return Object.fromEntries([...catalogueRefreshFields].filter(f=>f in desired&&!(preserveUnknown&&empty(desired[f]))&&!(empty(old?.[f])&&empty(desired[f]))&&!same(old?.[f],desired[f])).map(f=>[f,desired[f]]));
 }

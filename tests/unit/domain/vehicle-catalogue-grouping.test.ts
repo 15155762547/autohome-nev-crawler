@@ -26,3 +26,5 @@ test('catalogue refresh cannot change company business fields or unrelated techn
 });
 
 test('catalogue clearing treats Feishu empty selections as already empty',()=>{expect(cataloguePatch({battery_technology:[],v2l_availability:[],length_mm:null},{battery_technology:null,v2l_availability:null,length_mm:null})).toEqual({});});
+
+test('representative refresh preserves unverified historical values and business fields',()=>{expect(cataloguePatch({length_mm:4000,version:'Executive Flagship',seats_min:2},{length_mm:null,version:'Max',seats_min:2,seats_max:8},true)).toEqual({seats_max:8});});

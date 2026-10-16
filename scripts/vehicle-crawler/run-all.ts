@@ -21,7 +21,7 @@ try{
   queue={series_ids:ids,discovery_sha:sha(await Bun.file(join(root,'discovery.json')).text())};await save(queueFile,queue);
  }
  if(queue.discovery_sha!==sha(await Bun.file(join(root,'discovery.json')).text()))throw Error('Directory changed after queue creation');
- await checkpoint({total_series:queue.series_ids.length,total_batches:Math.ceil(queue.series_ids.length/batchSize),code_commit:(await Bun.file(join(root,'git-commit.txt')).exists())?(await Bun.file(join(root,'git-commit.txt')).text()).trim():'not-recorded'});
+ await checkpoint({total_series:queue.series_ids.length,total_batches:Math.ceil(queue.series_ids.length/batchSize),code_commit:process.env.CRAWLER_CODE_COMMIT??((await Bun.file(join(root,'git-commit.txt')).exists())?(await Bun.file(join(root,'git-commit.txt')).text()).trim():'not-recorded')});
  for(let start=state.cursor??0;start<queue.series_ids.length;start+=batchSize){
   if(await stopped())throw Error('Operator requested STOP');const disk=await statfs(root);if(disk.bavail*disk.bsize<2*1024**3)throw Error('Less than 2GiB disk free; pause to preserve artifacts');const ids=queue.series_ids.slice(start,start+batchSize),dir=join(root,`batch-${String(start/batchSize+1).padStart(4,'0')}`);await mkdir(dir,{recursive:true});
   await save(join(dir,'code-commit.json'),{commit:process.env.CRAWLER_CODE_COMMIT??'not-recorded',started_at:new Date().toISOString()});

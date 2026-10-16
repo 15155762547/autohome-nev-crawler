@@ -74,3 +74,18 @@ describe('Autohome catalog contracts ported from the ES8 collector', () => {
     expect(interpret(electric, [1], 'now')[0].trims[0].fields.drivetrain_display).toBeUndefined();
   });
 });
+
+test('seat intervals populate min/max and combine with fixed seat counts without guessing unknowns', () => {
+  const result = { bread: { seriesid: 2570, seriesname: '福家', brandname: '福汽启腾' },
+    titlelist: [{ items: [{ itemname: '能源类型', titleid: 1 }, { itemname: '座位数(个)', titleid: 2 }] }],
+    datalist: ['2-8', '5'].map((seats, i) => ({ specid: 1002430 + i, specname: '2017款 测试', specstatus: 40,
+      paramconflist: [{ titleid: 1, itemname: '纯电动' }, { titleid: 2, itemname: seats }] })) };
+  const model = interpret(result, [1002430, 1002431], 'now')[0].model;
+  expect(model.seats_min).toBe(2);
+  expect(model.seats_max).toBe(8);
+  for (const invalid of ['8-2', '-', '2/8', '0']) {
+    const bad = structuredClone(result); bad.datalist[0].paramconflist[1].itemname = invalid;
+    const m = interpret(bad, [1002430, 1002431], 'now')[0].model;
+    expect(m.seats_min).toBeUndefined(); expect(m.seats_max).toBeUndefined();
+  }
+});

@@ -107,10 +107,15 @@ export function interpret(input: unknown, allowed: number[], fetched: string): C
     const airbagCounts = specs.map(s => calculateAirbags(s, index).count).filter((v): v is number => v !== null);
     if (airbagCounts.length) model.airbags = Math.max(...airbagCounts);
     for (const [f, n] of Object.entries(modelNumbers)) { const v = commonNumber(n); if (v !== null) model[f] = v; }
-    for (const [stem, n] of [['seats', '座位数(个)'], ['top_speed', '最高车速(km/h)']]) {
-      const ns = values(n).map(numeric);
-      if (ns.every(x => x !== null)) { model[`${stem}_min${stem === 'seats' ? '' : '_kmh'}`] = Math.min(...ns as number[]); model[`${stem}_max${stem === 'seats' ? '' : '_kmh'}`] = Math.max(...ns as number[]); }
-    }
+    const seats = values('座位数(个)').map(value => {
+      const match = /^(\d+)(?:\s*[-–—~～]\s*(\d+))?$/.exec(value.trim());
+      if (!match) return null;
+      const min = Number(match[1]), max = Number(match[2] ?? match[1]);
+      return min > 0 && max >= min ? [min, max] : null;
+    });
+    if (seats.every(x => x !== null)) { model.seats_min = Math.min(...seats.map(x => x![0])); model.seats_max = Math.max(...seats.map(x => x![1])); }
+    const speeds = values('最高车速(km/h)').map(numeric);
+    if (speeds.every(x => x !== null)) { model.top_speed_min_kmh = Math.min(...speeds as number[]); model.top_speed_max_kmh = Math.max(...speeds as number[]); }
     if (values('电池特有技术').every(x => x === '刀片电池')) model.battery_technology = ['Blade'];
     if (values('级别').every(x => x && x === values('级别')[0])) model.vehicle_class = values('级别')[0];
     for (const [field, name] of [['sunroof_availability', '天窗类型'], ['v2l_availability', '对外放电']]) {

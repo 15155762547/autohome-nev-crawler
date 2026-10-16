@@ -1,3 +1,4 @@
+import { representativeModel, representativeNote } from '../../lib/vehicle-model-representative';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
@@ -18,7 +19,7 @@ export type Plan = { target: typeof LAB; source_sha: string; selection_sha: stri
   updates: Record<Kind, Planned[]>; model_ids: Record<string, string>; conflicts: unknown[]; pending: unknown[];
     groups: { key: string; model_key: string; series_id: number; spec_ids: number[]; images: Awaited<ReturnType<typeof downloadPhotos>> }[];
   refresh_seagull_scope?: boolean;
-  catalogue?: { snapshot: Catalogue; sha256: string };
+  catalogue?: { snapshot: Catalogue; sha256: string; representative_policy?: boolean };
   skipped_series?: { series_id: number; reason: string }[];
   alignment?: { reference: CompanyReference; reference_sha: string; align_existing: boolean; retired: Retirement[] } };
 
@@ -122,7 +123,7 @@ export async function plan(run: string, images = true, allowPartial = false, com
     const { patch, conflicts } = reconcileMaintained(prior, desired);
     const overrides = p.alignment?.align_existing ? alignmentPatch(kind, prior, desired) : {};
     if (p.refresh_seagull_scope && kind === 'models') Object.assign(overrides, seagullScopePatch(prior, desired));
-    if (p.catalogue && kind === 'models') Object.assign(overrides, cataloguePatch(prior, desired));
+    if (p.catalogue && kind === 'models') Object.assign(overrides, cataloguePatch(prior, desired, Boolean(p.catalogue.representative_policy)));
     if (p.catalogue && kind === 'trims') for (const field of ['trim_order', 'notes', 'source_url']) if (field in desired && !same(prior?.[field], desired[field])) overrides[field] = desired[field];
     Object.assign(patch, overrides);
     p.conflicts.push(...conflicts.filter(c => !(c.field in overrides)).map(c => ({ table: kind, key, ...c })));
@@ -146,7 +147,8 @@ export async function plan(run: string, images = true, allowPartial = false, com
     let candidates = interpret(raw.result, packet.spec_ids, parameter.fetched_at);
     if (p.alignment) candidates = companyCandidates(candidates, p.alignment.reference);
     if (p.catalogue) {
-      try { candidates = catalogueCandidates(candidates, p.catalogue.snapshot, before.models.rows, before.trims.rows); }
+      try { candidates = catalogueCandidates(candidates, p.catalogue.snapshot, before.models.rows, before.trims.rows);
+        if (packet.all_sales_states) { candidates = candidates.map(g => representativeModel(g, raw.result, packet.sales_states, parameter.fetched_at, packet.spec_provenance)); p.catalogue.representative_policy = true; } }
       catch (error) { p.skipped_series!.push({ series_id: sid, reason: String(error) }); continue; }
     }
     if (packet.spec_provenance) for (const g of candidates) for (const t of g.trims) {
@@ -192,14 +194,14 @@ export async function plan(run: string, images = true, allowPartial = false, com
       const oldChildren = g.trims.map(t => trims.get(`${sid}/${t.spec_id}`)?.record_id);
       Object.assign(desired, { trim_last_verified_at: parameter.fetched_at,
         trim_section_status_pruned: [linkedIds.some(id => !oldChildren.includes(id)) ? 'Partial' : 'Verified'],
-        trim_source_summary_pruned: `Autohome series ${sid}; current group specs ${currentIds.join(',')}; source fetched ${parameter.fetched_at}; ${p.alignment ? 'English product/configuration names and representative model year from company catalogue; source years remain per configuration.' : 'Chinese source names retained.'}` });
+        trim_source_summary_pruned: `Autohome series ${sid}; current group specs ${currentIds.join(',')}; source fetched ${parameter.fetched_at}; ${representativeNote(g)}${p.alignment ? 'English product/configuration names and representative model year from company catalogue; source years remain per configuration.' : 'Chinese source names retained.'}` });
       const missing = before.models.schema.filter(f => !['formula', 'link'].includes(f.type)).map(f => auditField('models', modelKey, f,
         f.name in desired ? desired[f.name] : prior?.[f.name], desired[f.name], g, parameter.url)).filter(e =>
         !(p.alignment && e.field === 'model_year') && ['来源未披露', '条件不明确', '枚举不适配', '代码未覆盖'].includes(e.category));
       const airbagNote = auditField('models', modelKey, { name: 'airbags', type: 'number' }, desired.airbags, desired.airbags, g, parameter.url).reason;
       const scopeNote = p.refresh_seagull_scope ? `销售范围：${packet.on_sale_spec_ids.length}款在售 + ${packet.upcoming_spec_ids.length}款预售/即将上市（${packet.upcoming_spec_ids.join(',')}）。预售价格和未披露参数留空。\n新旧尺寸不同，models共享尺寸留空，各款尺寸/座位数保存在base_spec_summary_json。\n后备厢930L、对外放电及3.3kW仅适用于原8款已披露配置，不能推及预售款；8款刀片电池明确，预售未披露，共享技术字段留空。\n78508公司英文名历史年款已按来源改为2027，名称其余部分沿用公司；model_year为公司展示年款，不代表全部配置。\n` : '';
       desired.review_notes = auditNotes(prior?.review_notes, `来源：${parameter.url}\n来源采集时间：${parameter.fetched_at}\n本组配置：${currentIds.join(',')}\n` +
-        scopeNote + (packet.all_sales_states ? `全状态范围：${Object.values(packet.sales_states).map((s: any) => s.label).filter((v: string, i: number, a: string[]) => a.indexOf(v) === i).join('、')}；共${currentIds.length}款，参数失败${packet.failed_specs.length}款。年款保留在配置；共同字段不同/未知时留空，气囊采用已披露最大值。停售不等于已证实停产，目录业务status不作销售状态。\n` : '') + `安全气囊：${airbagNote}\n` + missing.sort((a, b) => a.field.localeCompare(b.field)).map(e => `${e.field}：${e.reason}`).join('\n'));
+        scopeNote + (packet.all_sales_states ? `全状态范围：${Object.values(packet.sales_states).map((s: any) => s.label).filter((v: string, i: number, a: string[]) => a.indexOf(v) === i).join('、')}；共${currentIds.length}款，参数失败${packet.failed_specs.length}款。年款保留在配置；单值技术参数按代表配置规则；未核实时保留历史非空值，气囊采用已披露最大值。停售不等于已证实停产，目录业务status不作销售状态。\n` : '') + representativeNote(g) + `安全气囊：${airbagNote}\n` + missing.sort((a, b) => a.field.localeCompare(b.field)).map(e => `${e.field}：${e.reason}`).join('\n'));
       add('models', modelKey, desired, prior);
       for (const t of g.trims) {
         const key = `${sid}/${t.spec_id}`, old = trims.get(key);
@@ -429,7 +431,8 @@ export async function writeAudit(run: string, p: Plan, after: Record<Kind, Snaps
     const parameter = parameterSource(packet);
     const raw = await readParameters(run, packet);
     const candidates = interpret(raw.result, group.spec_ids, parameter.fetched_at);
-    const candidate = p.catalogue ? catalogueCandidates(candidates, p.catalogue.snapshot, p.before.models.rows, p.before.trims.rows).find(g => g.key === group.model_key)! : p.alignment ? companyCandidates(candidates, p.alignment.reference)[0] : candidates.length === 1 ? candidates[0] : mergeParentGroups(candidates);
+    let candidate = p.catalogue ? catalogueCandidates(candidates, p.catalogue.snapshot, p.before.models.rows, p.before.trims.rows).find(g => g.key === group.model_key)! : p.alignment ? companyCandidates(candidates, p.alignment.reference)[0] : candidates.length === 1 ? candidates[0] : mergeParentGroups(candidates);
+    if (p.catalogue?.representative_policy) candidate = representativeModel(candidate, raw.result, packet.sales_states, parameter.fetched_at, packet.spec_provenance);
     const model = after.models.rows.find(r => r.record_id === ids.models[group.model_key])!;
     const attachment = (model.brochure_cover as { name: string; size: number }[] ?? []).map(p => ({ name: p.name, size: p.size }));
     const imageReason = group.images.length ? '本次下载校验并上传匹配配置照片，附件回读已核对。' : attachment.length ? '已有附件保留，本轮没有替换或重传。' :

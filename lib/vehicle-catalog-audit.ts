@@ -1,3 +1,4 @@
+import { representativeFields, type Representative } from './vehicle-model-representative';
 import { empty, meaningful, modelNumbers, trimNumbers, protectedFields, same, selected, reconcile, type Candidate, type Cells } from './vehicle-catalog-source';
 import { calculateAirbags } from './vehicle-airbags';
 import { fieldLabels } from './vehicle-field-labels';
@@ -105,6 +106,13 @@ export function auditField(table: 'models' | 'trims', key: string, field: AuditF
     if (field.name === 'range_display' && !values.length) reason += ' 不以WLTC或油电综合续航替代CLTC。';
   } else {
     category = '代码未覆盖'; reason = '当前字段没有已实现且已核实的自动映射；不是来源缺失的证明。';
+  }
+  const representative = group.evidence.representative as Representative | undefined;
+  if (table === 'models' && representative && representativeFields.has(field.name)) {
+    const ids = representative.fields[field.name];
+    category = mapped ? '程序转换' : '条件不明确';
+    reason = mapped ? `代表配置规则；本字段证据来自spec ${ids?.join(',')}；代表款${representative.spec_id}（${representative.name}）。原始单位和条件保持，不代表全系共有值。` : `代表款${representative.spec_id}没有满足字段定义的映射值，其他配置也未满足一致补缺条件；历史非空值保留，原始值见逐款证据。`;
+    sourceUrl = representative.url;
   }
   if (present && mapped && !same(actual, candidate) && !maintainedFields.has(field.name) && !calculatedFields.has(field.name)) reason += ' 当前非空值与候选不同，保留现值并列出差异，可能是翻译/取整或事实差异。';
   if (present && !mapped && !programFields.has(field.name) && field.type !== 'formula' && !protectedFields.has(field.name)) reason += ' 当前值为历史保留，不宣称本次重新核实。';
