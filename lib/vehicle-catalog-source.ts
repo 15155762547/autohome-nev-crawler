@@ -1,3 +1,4 @@
+import { groundClearance, slowChargeTime } from './vehicle-parameter-rules';
 /** Rules reused from vehicle-crawler-es8/mapping.py and batch50.py, without cohort assertions. */
 import { z } from 'zod';
 import { calculateAirbags } from './vehicle-airbags';
@@ -106,7 +107,10 @@ export function interpret(input: unknown, allowed: number[], fetched: string): C
     const model: Cells = { MODEL: r.bread.seriesname, brand: r.bread.brandname, model: r.bread.seriesname, model_year: year, powertrain_type: [energy] };
     const airbagCounts = specs.map(s => calculateAirbags(s, index).count).filter((v): v is number => v !== null);
     if (airbagCounts.length) model.airbags = Math.max(...airbagCounts);
-    for (const [f, n] of Object.entries(modelNumbers)) { const v = commonNumber(n); if (v !== null) model[f] = v; }
+    for (const [f, n] of Object.entries(modelNumbers)) { if (f === 'ground_clearance_mm') continue; const v = commonNumber(n); if (v !== null) model[f] = v; }
+    const conditions = specs.map(s => ({ spec_id: s.specid, ground_clearance_mm: groundClearance(n => selected(s, index, n)), ac_slow_charge_full_time_hours: slowChargeTime(n => selected(s, index, n)) }));
+    const clearance = conditions.map(c => c.ground_clearance_mm);
+    if (clearance.every(c => c !== null) && clearance.every(c => c!.value === clearance[0]!.value && c!.condition === clearance[0]!.condition)) model.ground_clearance_mm = clearance[0]!.value;
     const seats = values('座位数(个)').map(value => {
       const match = /^(\d+)(?:\s*[-–—~～]\s*(\d+))?$/.exec(value.trim());
       if (!match) return null;
@@ -124,7 +128,8 @@ export function interpret(input: unknown, allowed: number[], fetched: string): C
     }
     const ac = specs.every(s => meaningful(selected(s, index, '慢充接口位置')) || numeric(selected(s, index, '电池慢充时间(小时)')) !== null);
     if (ac) model.ac_slow_charge_supported = true;
-    if (values('电池慢充电量范围(%)').every(x => x === '0-100') && commonNumber('电池慢充时间(小时)') !== null) model.ac_slow_charge_full_time_hours = commonNumber('电池慢充时间(小时)');
+    const slow = conditions.map(c => c.ac_slow_charge_full_time_hours);
+    if (slow.every(c => c !== null) && slow.every(c => c!.value === slow[0]!.value && c!.condition === slow[0]!.condition)) model.ac_slow_charge_full_time_hours = slow[0]!.value;
     const warranties = values('电池组质保').map((x, i) => x || values('三电系统质保')[i]);
     const ws = warranties.map(x => /^(\d+|[一二三四五六七八九十])年或(\d+(?:\.\d+)?)万公里$/.exec(x));
     if (ws.every(Boolean) && new Set(warranties).size === 1) {
@@ -163,6 +168,6 @@ export function interpret(input: unknown, allowed: number[], fetched: string): C
       }));
       return { spec_id: s.specid, fields };
     });
-    return { key, series_id: sid, year, energy, model, trims, evidence: { title_index: index, specs: specs.map(s => ({ spec_id: s.specid, raw: s.paramconflist })) } };
+    return { key, series_id: sid, year, energy, model, trims, evidence: { title_index: index, mapping_conditions: conditions, specs: specs.map(s => ({ spec_id: s.specid, raw: s.paramconflist })) } };
   });
 }

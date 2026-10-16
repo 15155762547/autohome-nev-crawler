@@ -16,3 +16,16 @@ test('rejects energy contamination',()=>{const g=mergeParentGroups(interpret(raw
 test('same price chooses newer year then larger spec ID; future price never overrides on-sale',()=>{const r=structuredClone(raw);r.datalist[0].paramconflist[4].itemname='20万';expect((run(r).evidence.representative as any).spec_id).toBe(2);});
 
 test('representative audit names exact configuration and audit notes replace without accumulating',async()=>{const {auditField,auditNotes}=await import('../../../lib/vehicle-catalog-audit');const g=run();const e=auditField('models',g.key,{name:'length_mm',type:'number'},4100,4100,g,'snapshot');expect(e.reason).toContain('spec 2');expect(e.source_url).toBe('https://www.autohome.com.cn/config/spec/2.html');const note=auditNotes('人工备注','代表配置2');expect(auditNotes(note,'代表配置2')).toBe(note);expect(note).toContain('人工备注');});
+
+test('load and approximate source AC conditions survive representative selection and notes',async()=>{
+ const r=structuredClone(raw);for(const [i,name] of ['满载最小离地间隙(mm)','电池慢充时间(小时)','NEDC纯电续航里程(km)','CLTC纯电续航里程(km)'].entries()){r.titlelist[0].items.push({itemname:name,titleid:20+i});for(const row of r.datalist)row.paramconflist.push({titleid:20+i,itemname:['125','6','200','450'][i]});}
+ const g=run(r);expect(g.model.ground_clearance_mm).toBe(125);expect(g.model.ac_slow_charge_full_time_hours).toBe(6);expect(g.model.ac_slow_charge_supported).toBeTrue();
+ const {representativeNote}=await import('../../../lib/vehicle-model-representative');const note=representativeNote(g);expect(note).toContain('满载');expect(note).toContain('SOC窗口未披露');expect(note).toContain('NEDC 200 km');expect(note).toContain('CLTC 450 km');
+ const {auditField}=await import('../../../lib/vehicle-catalog-audit');expect(auditField('models',g.key,{name:'ground_clearance_mm',type:'number'},125,125,g,'snapshot').reason).toContain('满载');
+});
+test('same numeric clearance under different load conditions is not a shared fallback',()=>{
+ const r=structuredClone(raw);r.titlelist[0].items.push({itemname:'满载最小离地间隙(mm)',titleid:20},{itemname:'空载最小离地间隙(mm)',titleid:21});r.datalist[0].paramconflist.push({titleid:20,itemname:'110'});r.datalist[2].paramconflist.push({titleid:21,itemname:'110'});expect(run(r).model.ground_clearance_mm).toBeNull();
+});
+test('declared partial slow-charge window cannot inherit another config full-charge time',()=>{
+ const r=structuredClone(raw);r.titlelist[0].items.push({itemname:'电池慢充时间(小时)',titleid:20},{itemname:'电池慢充电量范围(%)',titleid:21});for(const row of r.datalist){row.paramconflist.push({titleid:20,itemname:'6'},{titleid:21,itemname:row.specid===2?'20-80':'0-100'});}expect(run(r).model.ac_slow_charge_full_time_hours).toBeNull();
+});

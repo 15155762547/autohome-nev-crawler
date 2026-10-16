@@ -27,6 +27,7 @@ export function reconcileMaintained(old: Cells | undefined, desired: Cells) {
 }
 const fields: Record<string, string[]> = {
   ...Object.fromEntries(Object.entries({ ...modelNumbers, ...trimNumbers }).map(([k, v]) => [k, [v]])),
+  ground_clearance_mm: ['最小离地间隙(mm)', '满载最小离地间隙(mm)', '空载最小离地间隙(mm)'],
   MODEL: ['车系名称'], model: ['车系名称'], brand: ['品牌'], model_year: ['车型名称'], powertrain_type: ['能源类型'], vehicle_class: ['级别'],
   trim: ['车型名称'], trim_price_rmb: ['厂商指导价(元)'], trim_price_display: ['厂商指导价(元)'],
   seats_min: ['座位数(个)'], seats_max: ['座位数(个)'], top_speed_min_kmh: ['最高车速(km/h)'], top_speed_max_kmh: ['最高车速(km/h)'],
@@ -101,7 +102,7 @@ export function auditField(table: 'models' | 'trims', key: string, field: AuditF
       knownSpecs < specs.length ? `本组${specs.length}款中${knownSpecs}款返回有效${names.join('、')}，其余未披露；已有参数仅适用于有证据的配置，不能推广到全组。` :
       table === 'models' && new Set(values).size > 1 ? `本组${names.join('、')}存在不同值：${[...new Set(values)].join('/')}；单值字段不能表达差异，各配置原值保留在摘要中。` :
       field.type === 'select' ? `来源${names.join('、')}返回${[...new Set(values)].join('/')}，没有已核实的目标枚举映射，不猜填电机布局/结构类型。` :
-      field.name === 'ac_slow_charge_full_time_hours' ? '未同时获得慢充时长与明确0–100%电量窗口，不推算全充时间。' :
+      field.name === 'ac_slow_charge_full_time_hours' ? '未获得有效慢充时长，或来源明确为部分SOC区间；不从容量/功率推算全充时间。未披露SOC时可以采用来源近似时长并保留说明。' :
         '来源存在值，但同组不同、单位/条件不明确或当前解析不接受该格式；原值保留，待核对。';
     if (field.name === 'range_display' && !values.length) reason += ' 不以WLTC或油电综合续航替代CLTC。';
   } else {
@@ -112,7 +113,16 @@ export function auditField(table: 'models' | 'trims', key: string, field: AuditF
     const ids = representative.fields[field.name];
     category = mapped ? '程序转换' : '条件不明确';
     reason = mapped ? `代表配置规则；本字段证据来自spec ${ids?.join(',')}；代表款${representative.spec_id}（${representative.name}）。原始单位和条件保持，不代表全系共有值。` : `代表款${representative.spec_id}没有满足字段定义的映射值，其他配置也未满足一致补缺条件；历史非空值保留，原始值见逐款证据。`;
+    if (representative.conditions[field.name]?.length) reason += ' 条件：' + [...new Set(representative.conditions[field.name].map(c => `${c.source_field}=${c.raw}；${c.condition}；${c.rule}`))].join(' / ') + '。';
     sourceUrl = representative.url;
+  }
+  if (!representative && table === 'models' && mapped && ['ground_clearance_mm', 'ac_slow_charge_full_time_hours'].includes(field.name)) {
+    const conditions = evidence.flatMap(e => e.mapping_conditions as any[] ?? []).flatMap(c => c[field.name] ? [c[field.name]] : []);
+    if (conditions.length) { category = '程序转换'; reason = [...new Set(conditions.map(c => `${c.source_field}=${c.raw}；${c.condition}；${c.rule}`))].join(' / '); }
+  }
+  if (input === 'range_display' && !present && representative) {
+    const standards = Object.entries(representative.range_summary).map(([s,v]) => `${s} ${v.min}～${v.max} km（${v.known}/${v.total}款披露）`).join('；');
+    if (standards) reason += ` 来源另有按标准记录的数据：${standards}；已写入来源摘要，不混填CLTC列。`;
   }
   if (present && mapped && !same(actual, candidate) && !maintainedFields.has(field.name) && !calculatedFields.has(field.name)) reason += ' 当前非空值与候选不同，保留现值并列出差异，可能是翻译/取整或事实差异。';
   if (present && !mapped && !programFields.has(field.name) && field.type !== 'formula' && !protectedFields.has(field.name)) reason += ' 当前值为历史保留，不宣称本次重新核实。';
